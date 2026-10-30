@@ -270,40 +270,119 @@ static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
 
 // ------------------------------------------------------------------ memory map
 typedef struct { uint64_t addr, size; uint32_t type, perm; } Region;
-static Region regions[1024];
+// The memory map, sorted by address. Adjacent physical memory (MapPhysicalMemory) is kept as one region, as
+// Horizon merges its blocks: Tears of the Kingdom maps its virtual address memory 128 KB at a time.
+#define MAX_REGIONS 8192
+static Region regions[MAX_REGIONS];
 static int nregions;
+static pthread_mutex_t g_regions_lock = PTHREAD_MUTEX_INITIALIZER;  // (SVCs run on every guest thread)
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
+    pthread_mutex_lock(&g_regions_lock);
     for (int i = 0; i < nregions && n < max; i++)
         if ((regions[i].perm & 2) && regions[i].type != 0xB && regions[i].type != 0xC) {
             addr[n] = regions[i].addr; size[n] = regions[i].size; n++;
         }
+    pthread_mutex_unlock(&g_regions_lock);
     return n;
 }
 
-static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
-    if (nregions == 1024) FATAL("too many regions\n");
-    plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
+static int region_insert_locked(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
+    if (nregions == MAX_REGIONS) FATAL("too many regions\n");
     int i = nregions++;
     while (i > 0 && regions[i - 1].addr > addr) { regions[i] = regions[i - 1]; i--; }
     regions[i] = (Region){addr, size, type, perm};
+    return i;
+}
+
+static void region_delete_locked(int i) {
+    memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof(Region));
+    nregions--;
+}
+
+static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
+    plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
+    pthread_mutex_lock(&g_regions_lock);
+    region_insert_locked(addr, size, type, perm);
+    pthread_mutex_unlock(&g_regions_lock);
 }
 
 static void region_remove(uint64_t addr) {
+    pthread_mutex_lock(&g_regions_lock);
     for (int i = 0; i < nregions; i++) {
         if (regions[i].addr == addr) {
-            memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof(Region));
-            nregions--;
-            return;
+            region_delete_locked(i);
+            break;
         }
     }
+    pthread_mutex_unlock(&g_regions_lock);
 }
 
+// svcMapPhysicalMemory(addr, size): as Horizon's, the parts of the range already mapped stay mapped with their
+// contents; only the gaps get new (zeroed) memory. Physical regions that touch are merged.
+static void map_physical(uint64_t addr, uint64_t size) {
+    uint64_t end = addr + size, p = addr;
+    pthread_mutex_lock(&g_regions_lock);
+    while (p < end) {
+        uint64_t gap_end = end;
+        bool covered = false;
+        for (int i = 0; i < nregions; i++) {
+            uint64_t ra = regions[i].addr, re = ra + regions[i].size;
+            if (re <= p) continue;
+            if (ra <= p) { p = re; covered = true; }  // p is inside a region: skip past it
+            else gap_end = ra < end ? ra : end;
+            break;
+        }
+        if (covered) continue;
+        plat_commit(p, gap_end - p);
+        memset((void *)p, 0, gap_end - p);
+        int i = region_insert_locked(p, gap_end - p, 0x7, 3);
+        if (i + 1 < nregions && regions[i + 1].type == 0x7 && regions[i + 1].perm == 3 &&
+            regions[i].addr + regions[i].size == regions[i + 1].addr) {
+            regions[i].size += regions[i + 1].size;
+            region_delete_locked(i + 1);
+        }
+        if (i > 0 && regions[i - 1].type == 0x7 && regions[i - 1].perm == 3 &&
+            regions[i - 1].addr + regions[i - 1].size == regions[i].addr) {
+            regions[i - 1].size += regions[i].size;
+            region_delete_locked(i);
+        }
+        p = gap_end;
+    }
+    pthread_mutex_unlock(&g_regions_lock);
+}
+
+// svcUnmapPhysicalMemory(addr, size): every physical page in the range, splitting the regions it cuts.
+static void unmap_physical(uint64_t addr, uint64_t size) {
+    uint64_t end = addr + size;
+    pthread_mutex_lock(&g_regions_lock);
+    for (int i = 0; i < nregions; i++) {
+        Region r = regions[i];
+        uint64_t re = r.addr + r.size;
+        if (r.type != 0x7 || re <= addr || r.addr >= end) continue;
+        if (r.addr < addr && re > end) {  // the range is inside: two pieces remain
+            regions[i].size = addr - r.addr;
+            region_insert_locked(end, re - end, r.type, r.perm);
+            break;
+        }
+        if (r.addr < addr) { regions[i].size = addr - r.addr; continue; }
+        if (re > end) { regions[i].addr = end; regions[i].size = re - end; continue; }
+        region_delete_locked(i--);
+    }
+    pthread_mutex_unlock(&g_regions_lock);
+}
+
+static void query_memory_locked(uint64_t addr, uint64_t out);
 static void query_memory(uint64_t addr, uint64_t out) {
+    pthread_mutex_lock(&g_regions_lock);
+    query_memory_locked(addr, out);
+    pthread_mutex_unlock(&g_regions_lock);
+}
+static void query_memory_locked(uint64_t addr, uint64_t out) {
     uint64_t prev_end = 0;
     uint64_t info[5] = {0};  // addr, size, type|attr<<32, perm|ipc<<32, device|pad<<32
     for (int i = 0; i < nregions; i++) {
@@ -1068,12 +1147,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     }
     case 0x2C:  // MapPhysicalMemory(addr, size)
-        memset((void *)x[0], 0, x[1]);
-        region_add(x[0], x[1], 0x7, 3);
+        map_physical(x[0], x[1]);
         x[0] = R_OK;
         break;
-    case 0x2D:  // UnmapPhysicalMemory
-        region_remove(x[0]);
+    case 0x2D:  // UnmapPhysicalMemory(addr, size)
+        unmap_physical(x[0], x[1]);
         x[0] = R_OK;
         break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;
@@ -1157,9 +1235,12 @@ void kernel_reset(void) {
 // thread's wait state and its guest call chain, walked through the AArch64 frame records (x29 -> {fp, lr}) in
 // guest memory. For hangs: map the return addresses to functions with tools/ghidra/gq.py.
 static bool guest_mapped(uint64_t a, uint64_t n) {
-    for (int i = 0; i < nregions; i++)
-        if (a >= regions[i].addr && a + n <= regions[i].addr + regions[i].size) return true;
-    return false;
+    bool r = false;
+    pthread_mutex_lock(&g_regions_lock);
+    for (int i = 0; i < nregions && !r; i++)
+        if (a >= regions[i].addr && a + n <= regions[i].addr + regions[i].size) r = true;
+    pthread_mutex_unlock(&g_regions_lock);
+    return r;
 }
 
 // The current guest thread's lr and frame-record chain as of its last call boundary (dispatch.c, SAVAGEWIND_WATCH:
