@@ -840,6 +840,46 @@ static void perf_overlay_draw(ImGuiIO &io, float scale) {
     ImGui::End();
 }
 
+// The shader line, bottom left (runtime/nvn/vulkan/exec.c): while the pipeline pre-warm of a start runs, how far it is
+// ("Preparing shaders 812 / 3410"); after it, from the first shader or pipeline a draw has to build until 1.5 s after
+// the last, how many were built since the line appeared ("Building shaders 57"). The stutters of a first start after
+// an update of the shader translator (its caches and the pipeline list start empty: no total to give), or of places the
+// game shows for the first time, come with a line saying why. SAVAGEWIND_NO_SHADER_NOTICE=1 hides it.
+extern "C" void renderer_build_activity(uint64_t *built, uint64_t *last_ns);
+extern "C" bool renderer_prewarm_progress(int *done, int *total);
+static struct { bool warm; int done, total; uint64_t count, age; } g_sn;
+static bool shader_notice_update(void) {  // (once a frame) false: nothing to show
+    static int off = -1;
+    static uint64_t from;  // builds before the line appeared
+    if (off < 0) off = getenv("SAVAGEWIND_NO_SHADER_NOTICE") != NULL;
+    uint64_t built, last;
+    renderer_build_activity(&built, &last);
+    g_sn.warm = renderer_prewarm_progress(&g_sn.done, &g_sn.total);
+    uint64_t now = SDL_GetTicksNS();
+    g_sn.age = g_sn.warm || !last || now < last ? 0 : now - last;
+    bool due = !off && (g_sn.warm || (last && g_sn.age < 1500000000ull));
+    if (!due) from = built;
+    g_sn.count = built - from;
+    return due;
+}
+static void shader_notice_draw(ImGuiIO &io, float scale) {
+    float fade = g_sn.age > 1000000000ull ? 1.0f - (float)(g_sn.age - 1000000000ull) / 5e8f : 1.0f;  // (the last 0.5 s)
+    if (fade < 0) fade = 0;
+    // bottom left: Tears of the Kingdom keeps its hearts top left, its prompts bottom centre and its map bottom right
+    ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, fade);
+    ImGui::Begin("##shaders", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(0.72f);
+    static const char *const spin[] = {"|", "/", "-", "\\"};
+    const char *s = spin[SDL_GetTicksNS() / 125000000ull % 4];
+    if (g_sn.warm) ImGui::Text("%s  %s  %d / %d", s, tr("Preparing shaders"), g_sn.done, g_sn.total);
+    else ImGui::Text("%s  %s  %u", s, tr("Building shaders"), (unsigned)g_sn.count);
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
     float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
@@ -1020,7 +1060,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #endif
     bool open = g_open.load();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && g_settings.perf_overlay == PERF_OFF) {
+    bool notice = shader_notice_update();
+    if (!open && !kbd && g_settings.perf_overlay == PERF_OFF && !notice) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -1067,6 +1108,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui::NewFrame();
 
     if (g_settings.perf_overlay != PERF_OFF) perf_overlay_draw(io, scale);
+    if (notice) shader_notice_draw(io, scale);
 
     if (open) {
         // dim the game behind the menu

@@ -207,6 +207,9 @@ static void dump_largest_textures(const char *why) {
 
 static uint64_t frames, total_frames;
 uint64_t renderer_present_count(void) { return total_frames; }
+// (the overlay's shader line, runtime/nvn/vulkan/exec.c: not counted here)
+void renderer_build_activity(uint64_t *built, uint64_t *last_ns) { *built = 0, *last_ns = 0; }
+bool renderer_prewarm_progress(int *done, int *total) { (void)done, (void)total; return false; }
 
 // Output resolution: render targets the game sizes for the 1920x1080 screen are allocated at
 // (sx, sy) times their guest size. Shaders and the renderer keep working in guest ("logical") units.

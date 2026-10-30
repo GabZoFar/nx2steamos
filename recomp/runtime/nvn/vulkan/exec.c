@@ -88,6 +88,20 @@ static void dyn_check(void) {  // (after vk_cmd) a new command buffer or foreign
 static _Atomic int stat_compiles;  // programs and pipelines built where first needed
 static _Atomic int stat_warm;      // ... found built: by the pre-warm (pso_init) or for other programs with the same stages
 static void pso_init(void);
+
+// For the overlay's shader line (runtime/ui/menu.mm): what draws built since start-up, not found built (programs,
+// pipelines and compute programs, as stat_compiles counts them; not the pre-warm's), and when the last one was. Each
+// is a stutter, or draws skipped with asynchronous shaders: after a change of the shader translator, whose caches and
+// pipeline list then start empty, or in places the game had not shown yet.
+static _Atomic uint64_t built_total, built_last_ns;
+static void built_one(void) {
+    atomic_fetch_add(&built_total, 1);
+    atomic_store(&built_last_ns, SDL_GetTicksNS());
+}
+void renderer_build_activity(uint64_t *built, uint64_t *last_ns) {
+    *built = atomic_load(&built_total);
+    *last_ns = atomic_load(&built_last_ns);
+}
 static _Atomic uint64_t prof_c_tr, prof_c_prog, prof_c_pipe, prof_c_comp, prof_c_ntr, prof_c_nprog, prof_c_npipe;  // (VK_PROF) compile ns / counts
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
@@ -1699,6 +1713,7 @@ static void compile_program(void *arg) {
     p->stages.f = b->f;
     if (made) {
         atomic_fetch_add(&stat_compiles, 1);
+        built_one();
         atomic_fetch_add(&prof_c_prog, SDL_GetTicksNS() - pt0); atomic_fetch_add(&prof_c_nprog, 1);
     } else {
         atomic_fetch_add(&stat_warm, 1);
@@ -2524,6 +2539,7 @@ static void build_pipeline(void *arg) {
         warm_done(w, p, r);
         if (r == VK_SUCCESS) pso_record(1, vk_translate_id(k->prog->vi), vk_translate_id(k->prog->fi), &k->s, sizeof k->s);
         atomic_fetch_add(&stat_compiles, 1);
+        built_one();
         atomic_fetch_add(&prof_c_pipe, SDL_GetTicksNS() - pt0); atomic_fetch_add(&prof_c_npipe, 1);
     } else {
         atomic_fetch_add(&stat_warm, 1);
@@ -3682,6 +3698,7 @@ static void build_compute(void *arg) {
         cs_make(c);
         if (atomic_load(&c->state) == 2) pso_record(2, vk_translate_id(cp->si), 0, cp->local, sizeof cp->local);
         atomic_fetch_add(&stat_compiles, 1);
+        built_one();
         atomic_fetch_add(&prof_c_comp, SDL_GetTicksNS() - pt0);
     } else {
         atomic_fetch_add(&stat_warm, 1);
@@ -4133,6 +4150,14 @@ bool vk_pso_wait(int ms, float *done) {
     for (int t = 0; t < ms && atomic_load(&pso_running); t += 5) SDL_Delay(5);
     *done = pso_nrecs ? (float)atomic_load(&pso_finished) / (float)pso_nrecs : 1.0f;
     return !atomic_load(&pso_running);
+}
+
+// (the overlay's shader line, runtime/ui/menu.mm) while the pre-warm runs: the pipelines of the list done, of all
+bool renderer_prewarm_progress(int *done, int *total) {
+    if (!atomic_load(&pso_running)) return false;
+    *done = atomic_load(&pso_finished);
+    *total = pso_nrecs;
+    return true;
 }
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
