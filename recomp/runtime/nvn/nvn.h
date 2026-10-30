@@ -34,6 +34,7 @@ typedef struct NvnTexture {
     uint64_t debug_id;
     bool finalized;  // nvnTextureFinalize ran (the object stays: pool entries and copies may still name it)
     uint32_t cpu_levels;  // levels nvnTextureWriteTexels filled since the renderer last uploaded them (bit per level)
+    float present_crop[4];  // (a window texture) the part of it presented, set at each present: x, y, w, h as fractions
     char label[64];
 } NvnTexture;
 NvnTexture *nvn_texture_host(uint64_t guest);  // (objects.c) the host texture a guest NVNtexture holds now, or NULL

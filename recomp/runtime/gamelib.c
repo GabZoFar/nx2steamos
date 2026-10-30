@@ -71,6 +71,14 @@ const char *gamelib_cpu_problem(void) {
 
 // ------------------------------------------------------------------ loading
 
+// The main module as the game code was generated for it: its NSO build id (64 hex digits) and guest base ("", 0
+// before a library is loaded). runtime/hle/frame_timing.c keys its per-build knowledge by it.
+const char *gamelib_main_build_id(uint64_t *base) {
+    if (!g_tables || !*g_tables->nmodules) { if (base) *base = 0; return ""; }
+    if (base) *base = g_tables->modules[0].base;
+    return g_tables->modules[0].build_id;
+}
+
 GameSites g_site;
 const char *g_game_version = "";
 

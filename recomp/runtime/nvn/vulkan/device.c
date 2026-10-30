@@ -1255,6 +1255,13 @@ static void present_locked(NvnTexture *t) {
         }
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {(float)os.crop[0], (float)os.crop[1], (float)os.crop[2], (float)os.crop[3]};  // (uv origin, size)
+        if (t->present_crop[2] > 0 && t->present_crop[3] > 0) {  // within the game's window crop (handheld Tears of the Kingdom:
+            const float *wc = t->present_crop;                    // 1280x720 of its 1920x1080 window textures)
+            crop[0] = wc[0] + crop[0] * wc[2];
+            crop[1] = wc[1] + crop[1] * wc[3];
+            crop[2] *= wc[2];
+            crop[3] *= wc[3];
+        }
         renderer_set_scale((float)sx, (float)sy);
         renderer_set_scene_scale((float)os.scene_sx, (float)os.scene_sy);
         renderer_set_shadow_size(shadow_map_size(total_frames + 1));

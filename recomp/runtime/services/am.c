@@ -4,6 +4,12 @@
 
 #include "../hle.h"
 #include "../ipc.h"
+
+static bool am_handheld(void) {  // SAVAGEWIND_HANDHELD=1: the console in handheld mode (GetOperationMode, below)
+    static int on = -1;
+    if (on < 0) on = getenv("SAVAGEWIND_HANDHELD") && atoi(getenv("SAVAGEWIND_HANDHELD")) != 0;
+    return on;
+}
 #include "../language.h"
 
 #define AM_NO_MESSAGE MAKE_RESULT(128, 3)
@@ -78,15 +84,18 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
         }
         pthread_mutex_unlock(&g_klock);
         break;
-    case 5: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetOperationMode: docked
-    case 6: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost
+    // GetOperationMode / GetPerformanceMode: docked and boost, or with SAVAGEWIND_HANDHELD=1 handheld and normal: a game
+    // then renders at its handheld sizes (Tears of the Kingdom: 1280x720 at most, not 1600x896 into a 1920x1080 output),
+    // which is what a Steam Deck's 1280x800 screen shows anyway
+    case 5: OUT(uint8_t, 0) = am_handheld() ? 0 : 1; resp_size(resp, 1); break;
+    case 6: OUT(uint32_t, 0) = am_handheld() ? 0 : 1; resp_size(resp, 4); break;
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
     case 60: {  // GetDefaultDisplayResolution
-        int w = getenv("SAVAGEWIND_DISPLAY_W") ? atoi(getenv("SAVAGEWIND_DISPLAY_W")) : 1920;
-        LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
-        OUT(int32_t, 0) = w; OUT(int32_t, 4) = 1080; resp_size(resp, 8); break;
+        int w = getenv("SAVAGEWIND_DISPLAY_W") ? atoi(getenv("SAVAGEWIND_DISPLAY_W")) : am_handheld() ? 1280 : 1920, h = am_handheld() ? 720 : 1080;
+        LOG("[am] GetDefaultDisplayResolution -> %dx%d\n", w, h);
+        OUT(int32_t, 0) = w; OUT(int32_t, 4) = h; resp_size(resp, 8); break;
     }
     default: UNHANDLED("ICommonStateGetter");
     }

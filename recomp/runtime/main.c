@@ -168,6 +168,7 @@ static void boot(const char *root) {
     { extern void language_booted(void); language_booted(); }  // (runtime/language.c)
     kernel_init();
     dispatch_init();
+    { extern void frame_timing_boot(void); frame_timing_boot(); }  // (runtime/hle/frame_timing.c)
     { extern void jpeg_debug_init(void); jpeg_debug_init(); }
 
     g_program_id = 0;

@@ -1220,9 +1220,22 @@ NVN(nvnQueuePresentTexture) {
     static int logged = -1;
     if (logged != w->interval) { logged = w->interval; LOG("[nvn] window present interval %d\n", w->interval); }
     TL("present (pace)");
-    present_pace(w->interval);
+    extern int frame_timing_interval(void);  // (runtime/hle/frame_timing.c: the interval a site-free game chose)
+    int fiv = frame_timing_interval();
+    present_pace(fiv > 0 ? fiv : w->interval);
     if (frame_split()) g_fs_pace = plat_now_ns();
     perfmon_frame();
+    if (i >= 0 && i < w->num) {  // the window's crop (nvnWindowSetCrop; none: the whole texture), with the texture to the present
+        NvnTexture *pt = HOST(NvnTexture, w->textures[i]);
+        const int *cr = w->crop;
+        bool part = pt && pt->width && pt->height && cr[2] > 0 && cr[3] > 0 && ((uint32_t)cr[2] < pt->width || (uint32_t)cr[3] < pt->height);
+        if (pt) {
+            pt->present_crop[0] = part ? (float)cr[0] / pt->width : 0;
+            pt->present_crop[1] = part ? (float)cr[1] / pt->height : 0;
+            pt->present_crop[2] = part ? (float)cr[2] / pt->width : 1;
+            pt->present_crop[3] = part ? (float)cr[3] / pt->height : 1;
+        }
+    }
     TL("present (backend)");
     if (async_exec()) {
         if (i >= 0 && i < w->num) queue_put(QOP_PRESENT, 0, HOST(NvnTexture, w->textures[i]));
