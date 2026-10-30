@@ -1153,6 +1153,34 @@ static void sdk_process(Cpu *c) {
     sdk_take_sink(&g_sdkren, list);
 }
 
+// The light limiter's state (look-ahead buffers in its work buffer) is set up by InitializeLightLimiterEffect only
+// for a command whose parameter still says Initialized (0); the server marks it Updated (2) after the first frame.
+// A limiter added while disabled and enabled later (Tears of the Kingdom's, depending on timing) is applied with
+// a state never set up: the ADSP reads address 0 harmlessly, the CPU does not. So the first time it is applied
+// enabled with no buffers, it is set up then, from the command (LightLimiterCommandVersion2: +0x30 the parameter,
+// +0x78 the state, +0x80 the work buffer; ProcessLightLimiterCommandImpl, sdk 0x24a550 in Tears of the Kingdom
+// 1.4.3) - what the console does when the parameter is Initialized.
+static GuestFn g_ll_apply;
+static uint64_t g_ll_init;
+static void ll_apply(Cpu *c) {
+    uint64_t param = c->x[0], state = c->x[1], cmd = param - 0x30;
+    if ((c->x[2] & 1) && in_guest(state, 8) && !*(const uint64_t *)(uintptr_t)state && in_guest(cmd + 0x78, 0x10) &&
+        *(const uint64_t *)(uintptr_t)(cmd + 0x78) == state && *(const uint64_t *)(uintptr_t)(cmd + 0x80)) {
+        uint64_t save[7];
+        memcpy(save, c->x, sizeof save);
+        uint64_t lr = c->x[30];
+        c->x[2] = *(const uint64_t *)(uintptr_t)(cmd + 0x80);
+        LOG("[audren-sdk] light limiter enabled before it was set up: set up now (state %llx, work buffer %llx)\n",
+            (unsigned long long)state, (unsigned long long)c->x[2]);
+        guest_call(c, g_ll_init);
+        memcpy(c->x, save, sizeof save);
+        c->x[30] = lr;
+    }
+    uint64_t lr = c->x[30];
+    g_ll_apply(c);
+    c->x[30] = lr;
+}
+
 // svcSleepThread: the core goes to other threads meanwhile, and a reboot stops the thread there.
 static void sdk_sleep(Cpu *c, uint64_t ns) {
     c->x[0] = ns;
@@ -1310,6 +1338,11 @@ HLE_FUNC("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11Sy
         if (!g_sdk_process) FATAL("[audren-sdk] CommandListProcessor::Process %llx isn't recompiled\n", proc);
         hle_override(proc, sdk_process, "CommandListProcessor::Process");
         hooked = proc;
+        // (Apply is reached through the sdk's PLT, so an override takes it)
+        uint64_t apply = guest_sym("_ZN2nn5audio23ApplyLightLimiterEffectEPKNS0_21LightLimiterParameterEPNS0_17LightLimiterStateEbPPKiPPiiPNS0_30LightLimiterStatisticsInternalE");
+        g_ll_init = guest_sym("_ZN2nn5audio28InitializeLightLimiterEffectEPKNS0_21LightLimiterParameterEPNS0_17LightLimiterStateEPv");
+        if (apply && g_ll_init && (g_ll_apply = dispatch_lookup(apply)))
+            hle_override(apply, ll_apply, "ApplyLightLimiterEffect");
     }
     r->renderer = *(const uint64_t *)(uintptr_t)h;
     r->context = *(const uint64_t *)(uintptr_t)(h + 8);
