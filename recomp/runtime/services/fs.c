@@ -811,6 +811,43 @@ static Service *open_host_fs(const char *sub) {
     return service_new("IFileSystem", filesystem, fs);
 }
 
+// ------------------------------------------------------------------ ISaveDataInfoReader
+// What OpenSaveDataInfoReader* lists: the game's own save data of one type, those it has made (save_<type>/ under
+// the save directory). Tears of the Kingdom looks for its cache storage (type 5) this way before it mounts it.
+typedef struct { int type; bool done; } InfoReader;
+
+static void save_info_reader(Service *s, IpcReq *req, IpcResp *resp) {
+    InfoReader *r = s->state;
+    switch (req->cmd) {
+    case 0: {  // ReadSaveDataInfo -> count, B buffer of 0x60-byte SaveDataInfo
+        IpcBuf *b = out_buf(req, 0);
+        int64_t n = 0;
+        char p[1100];
+        struct stat sb;
+        snprintf(p, sizeof p, "%s/save_%d", g_save_dir, r->type);
+        if (!r->done && r->type >= 0 && b->size >= 0x60 && !stat(p, &sb) && S_ISDIR(sb.st_mode)) {
+            uint8_t *e = (uint8_t *)(uintptr_t)b->addr;
+            memset(e, 0, 0x60);
+            e[0x8] = 1;  // space: user
+            e[0x9] = (uint8_t)r->type;
+            memcpy(e + 0x28, &g_program_id, 8);
+            n = 1;
+        }
+        r->done = true;
+        OUT(int64_t, 0) = n;
+        resp_size(resp, 8);
+        break;
+    }
+    default: LOG("[fs] ISaveDataInfoReader cmd %u (ok)\n", req->cmd);
+    }
+}
+
+static Service *open_save_info_reader(int type) {
+    InfoReader *r = calloc(1, sizeof *r);
+    r->type = type;
+    return service_new("ISaveDataInfoReader", save_info_reader, r);
+}
+
 // ------------------------------------------------------------------ fsp-srv
 SERVICE("fsp-srv", fsp_srv) {
     (void)s;
@@ -825,6 +862,10 @@ SERVICE("fsp-srv", fsp_srv) {
         ipc_return_object(resp, open_host_fs(sub));
         break;
     }
+    // OpenSaveDataInfoReader, ...BySaveDataSpaceId, ...BySaveDataFilter: none listed; ...OnlyCacheStorage: the cache
+    // storage, once the game has made it
+    case 60: case 61: case 68: ipc_return_object(resp, open_save_info_reader(-1)); break;
+    case 62: ipc_return_object(resp, open_save_info_reader(5)); break;
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
     case 202:  // OpenDataStorageByDataId (system data archives)
         LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));
