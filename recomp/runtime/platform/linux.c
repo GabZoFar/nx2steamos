@@ -196,6 +196,10 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP], sp = (uint64_t)uc->uc_mcontext.gregs[REG_RSP], lr = 0;
     if (sig != SIGSEGV || (fa & ~0xFFFull) != (sp & ~0xFFFull)) lr = *(uint64_t *)(uintptr_t)sp;
 #endif
+#if !defined(__aarch64__)
+    extern int g_fault_is_write;  // (the watchpoint's SAVAGEWIND_WATCH_WRITES: the page fault's error code, bit 1)
+    g_fault_is_write = sig == SIGSEGV && (uc->uc_mcontext.gregs[REG_ERR] & 2) != 0;
+#endif
     if (rt_fault_watch(fa, pc)) return;
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);
