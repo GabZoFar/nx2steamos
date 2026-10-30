@@ -1,0 +1,6 @@
+# python -m pip install -r requirements.txt   (Python 3.11 or later; on SteamOS: python -m venv ~/.venvs/nx2steamos first, the system Python is read-only)
+lz4
+capstone
+pillow
+pyyaml
+backports.zstd; python_version < "3.14"

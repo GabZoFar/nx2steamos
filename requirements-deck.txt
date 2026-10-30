@@ -1,0 +1,6 @@
+# python -m pip install -r requirements-deck.txt: the porter with the Steam Deck engine (porter port --engine recomp). Its code generator's modules at the versions
+# Savage Wind's own build freezes them with (recomp/tools/linux/gen_helper.sh); unicorn is the generator's only module the ARM64 engine does not need.
+-r requirements.txt
+capstone==5.0.9
+unicorn==2.1.4
+lz4==4.4.5

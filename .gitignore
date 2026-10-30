@@ -1,0 +1,27 @@
+# Toolchains, downloaded locally (Zig, .NET); the player folder is outside the repository (porter/paths.py)
+/tools/
+# Scratch work and probe outputs (some are made from game files)
+/work/
+/build/
+/probes/out/
+
+# SteamOS build outputs
+/nxnative/dm/steamos/out/
+*.spv
+*.dmsv
+__pycache__/
+
+# Keys: never committed
+prod.keys
+title.keys
+/devtools/device.json
+
+# Game dumps and the ports made from them; one folder per game, .gamedump/<game>/
+/.gamedump/
+
+# Python environment (python -m venv .venv)
+/.venv/
+
+# The player bundle
+/dist/
+.DS_Store
