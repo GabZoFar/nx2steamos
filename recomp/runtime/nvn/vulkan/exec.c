@@ -658,6 +658,7 @@ static struct {
     bool prim_restart;
     uint32_t restart_index;
     bool depth_clamp;
+    bool render_off;  // SetRenderEnable(false), or a SetRenderEnableConditional that failed: draws and clears skipped
     uint64_t copy_row_stride, copy_image_stride;
 } st;
 
@@ -5954,13 +5955,37 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_SET_POLYGON_OFFSET: memcpy(st.poly_offset, r->f, sizeof st.poly_offset); break;
         case CMD_SET_PRIMITIVE_RESTART: st.prim_restart = r->x[0] != 0; st.restart_index = (uint32_t)r->x[1]; break;
         case CMD_SET_COPY_STRIDES: st.copy_row_stride = r->x[0]; st.copy_image_stride = r->x[1]; break;
+        case CMD_SET_RENDER_ENABLE:
+            // Conditional rendering: SetRenderEnableConditional(mode, counters) compares the 64-bit counters at
+            // counters and counters + 16 (RENDER_IF_EQUAL 0, RENDER_IF_NOT_EQUAL 1) and draws or clears nothing
+            // until the next SetRenderEnable if the test fails. Tears of the Kingdom wraps most clears in
+            // RENDER_IF_NOT_EQUAL with a timestamp ReportCounter after each (counter field 0, as written above): the
+            // CPU sets the first counter to 1 when a target needs clearing, so later clears of it are skipped. Run
+            // anyway, they cleared what the lighting had drawn and the scene came out black (nxnative's finding,
+            // docs/agents/04-graphics.md). The counters are read here, in replay order, so a report replayed
+            // earlier in the same list counts; a samples-passed result not back yet (an occlusion query) draws.
+            if (r->x[6] == 1) {
+                const uint64_t *ctr = (const uint64_t *)(uintptr_t)r->x[1];
+                bool pending = false;
+                pthread_mutex_lock(&readback_lock);
+                for (int i = 0; i < oq_nreports; i++)
+                    if (oq_reports[i].addr == r->x[1] || oq_reports[i].addr == r->x[1] + 16) pending = true;
+                pthread_mutex_unlock(&readback_lock);
+                bool equal = ctr && ctr[0] == ctr[2];
+                st.render_off = ctr && !pending && (r->x[0] == 0 ? !equal : equal);
+                static bool logged;
+                if (!logged) { logged = true; LOG("[nvn] conditional rendering (SetRenderEnableConditional) in use\n"); }
+            } else {
+                st.render_off = r->x[0] == 0;
+            }
+            break;
         case CMD_CLEAR_COLOR: {
             snap_reason = "clear-color"; snapshots_invalidate(NULL);
             int index = (int)r->x[0];
             if (getenv("SAVAGEWIND_LOG_CLEARS") && index < st.rt.ncolor && st.rt.color[index])
                 LOG("[cclear] frame %llu idx %d %ux%u f%#x mask %#x\n", (unsigned long long)renderer_present_count(), index,
                     st.rt.color[index]->width, st.rt.color[index]->height, st.rt.color[index]->format, (uint32_t)r->x[2]);
-            if (index < st.rt.ncolor && st.rt.color[index]) clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
+            if (index < st.rt.ncolor && st.rt.color[index] && !st.render_off) clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
             break;
         }
         case CMD_CLEAR_TEXTURE: {
@@ -5990,14 +6015,14 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_CLEAR_DEPTH_STENCIL:
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
-            if (st.rt.depth) {
+            if (st.rt.depth && !st.render_off) {
                 bool has_stencil = renderer_format_has_stencil(st.rt.depth->format);
                 clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
-        case CMD_DRAW_ARRAYS: draw(r, false); break;
-        case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_DRAW_ARRAYS: if (!st.render_off) draw(r, false); break;
+        case CMD_DRAW_ELEMENTS: if (!st.render_off) draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             if (g_debug_frame && getenv("SAVAGEWIND_LOG_BINDS"))
                 LOG("[bind] update ubuf %llx (size %llu) +%llu: %llu bytes\n", (unsigned long long)r->x[0], (unsigned long long)r->x[1],

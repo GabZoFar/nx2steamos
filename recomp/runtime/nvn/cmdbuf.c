@@ -529,8 +529,14 @@ PLAIN(nvnCommandBufferSetPolygonOffsetClamp, CMD_SET_POLYGON_OFFSET)
 PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
-PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
-NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; UNIMPLEMENTED_ONCE("SetRenderEnableConditional"); }
+// SetRenderEnable(enable): x[0] the flag, x[6] 0. SetRenderEnableConditional(mode, counters): x[0] the mode, x[1]
+// the counters' address, x[6] 1 (exec.c compares the counters when the list is replayed).
+NVN(nvnCommandBufferSetRenderEnable) { Snap s = snap(c); CmdRec *r = record(c, CMD_SET_RENDER_ENABLE, 0, &s); r->x[6] = 0; }
+NVN(nvnCommandBufferSetRenderEnableConditional) {
+    Snap s = snap(c);
+    CmdRec *r = record(c, CMD_SET_RENDER_ENABLE, 0, &s);
+    r->x[6] = 1;
+}
 PLAIN(nvnCommandBufferSetDepthClamp, CMD_SET_DEPTH_CLAMP)
 NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; UNIMPLEMENTED_ONCE("SetRasterizerDiscard"); }
 NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
