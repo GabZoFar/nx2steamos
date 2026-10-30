@@ -10,7 +10,7 @@ Every game nx2steamos can port, and whether it plays on a SteamOS device. This p
 | KONKR Pocket FIT, AYANEO Pocket S2 | Snapdragon 8 Gen 3, Adreno 750 | SteamOS-ARM-Port (Valve's Mesa) | not tried yet |
 | AYN Odin 2 / 3, Thor, Retroid Pocket 6 … | Snapdragon 8 Gen 2 / 8 Elite | SteamOS-ARM-Port | not tried yet |
 | Steam Frame | Snapdragon 8 Gen 3, Adreno 750 | Valve's SteamOS (VR session) | not tried yet |
-| Steam Deck (LCD, OLED) | AMD Van Gogh / Sephiroth (Zen 2, RDNA 2) | SteamOS 3 | the recompiler engine (`recomp/`, [RECOMP.md](RECOMP.md)): built and tested in an x86-64 container, its game folders made by the porter (`--engine recomp`), not run on a Deck through nx2steamos yet; Savage Wind Recomp itself has played *Breath of the Wild* 1.9.0 on one (SteamOS 3.8, RADV) |
+| Steam Deck (LCD, OLED) | AMD Van Gogh / Sephiroth (Zen 2, RDNA 2) | SteamOS 3 | the recompiler engine (`recomp/`, [RECOMP.md](RECOMP.md)): built and tested in an x86-64 container, its game folders made by the porter (`--engine recomp`), Tears of the Kingdom has run on one through nx2steamos (2026-10-30, SteamOS 3.9.5, RADV); Savage Wind Recomp itself has played *Breath of the Wild* 1.9.0 on one (SteamOS 3.8, RADV) |
 
 A first run on an ARM64 device: `python -m porter device` (what it is), the probes (`probes/README.md`), then one of the games below.
 
@@ -19,7 +19,7 @@ A first run on an ARM64 device: `python -m porter device` (what it is), the prob
 | Game | Title ID | Steam Deck (`recomp/`) | Through nx2steamos (`deck.tsv`) |
 |---|---|---|---|
 | The Legend of Zelda: Breath of the Wild 1.8.2, 1.9.0 | `01007EF00011E000` | Savage Wind's game: the opening and the Great Plateau, played by its testers, about 40 fps on a Deck with the 60 fps cap | untested: the porter makes its folder (`--engine recomp`) |
-| The Legend of Zelda: Tears of the Kingdom 1.4.3 | `0100F2C0115B6000` | game code recompiled without sites; no Deck launch yet | experimental: `deck.tsv` selects the site-free runtime path; custom AppImage required |
+| The Legend of Zelda: Tears of the Kingdom 1.4.3 | `0100F2C0115B6000` | runs on a Steam Deck (2026-10-30): menus, saves, the opening at 30 fps with sound; objects unlit, so not playable yet ([RECOMP.md](RECOMP.md), "Games") | experimental: `deck.tsv` selects the site-free runtime path; custom AppImage required |
 
 ## Games on ARM64 SteamOS
 
