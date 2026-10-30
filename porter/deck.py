@@ -117,16 +117,25 @@ def check_build(exefs, romfs, versions=None):
 
 # ---- the game profile's Steam Deck keys ----
 class DeckProfile:
-    """deck.tsv (key <TAB> value, # comments): status, tested (<version> <device>), and sites (yes for game-specific patches, no for a site-free build)."""
-    KEYS = ('status', 'tested', 'sites')
+    """deck.tsv (key <TAB> value, # comments): status, tested (<version> <device>), sites (yes for game-specific patches, no for a site-free build), and env
+    (NAME=VALUE, repeatable: a runtime setting the folder's launcher exports, e.g. SAVAGEWIND_NO_SCALE=1)."""
+    KEYS = ('status', 'tested', 'sites', 'env')
+    ENV_NAME = re.compile(r'[A-Z_][A-Z0-9_]*')
+    ENV_VALUE = re.compile(r'[A-Za-z0-9_.,:/=+-]*')   # (written between single quotes in the launcher as it is)
 
     def __init__(self, g):
         self.game, self.id, self.path = g, g.id, g.dir / DECK_TSV
-        rows = {}
+        rows, self.env = {}, []
         for n, line in enumerate(self.path.read_text(encoding='utf-8').splitlines(), 1):
             if not line.strip() or line.lstrip().startswith('#'): continue
             k, _, v = line.partition('\t'); k, v = k.strip(), v.strip()
             if k not in self.KEYS: raise steamos_profile.ProfileError(f'{self.path}:{n}: unknown key {k!r} (keys: {", ".join(self.KEYS)})')
+            if k == 'env':
+                name, eq, value = v.partition('=')
+                if not eq or not self.ENV_NAME.fullmatch(name) or not self.ENV_VALUE.fullmatch(value):
+                    raise steamos_profile.ProfileError(f'{self.path}:{n}: env {v!r}: NAME=VALUE (NAME in capitals, VALUE letters, digits and _.,:/=+-)')
+                self.env.append((name, value))
+                continue
             if k in rows: raise steamos_profile.ProfileError(f'{self.path}:{n}: {k} given twice')
             rows[k] = v
         self.status, self.tested = rows.get('status', 'experimental'), rows.get('tested', '')

@@ -96,18 +96,21 @@ def safe_name(n):   # a file name the launcher can hold between double quotes as
     return re.sub(r'[^A-Za-z0-9._+-]', '_', n)
 
 
-def deck_launcher(name, title_id, appimage, romfs_key):
+def deck_launcher(name, title_id, appimage, romfs_key, env=()):
     """The Steam Deck folder's launcher: Savage Wind's runtime with the folder's game files (its first argument) and the game's own state folder as its data root (saves,
     settings, shader caches, savagewind.log: nothing the player makes lives in the folder). The data image (game/romfs.bin) is built here when it is missing or older than
     the RomFS (an install builds it first: PREPARE); without FUSE the AppImage unpacks itself to /tmp at each start instead of mounting. Steam's launch options go to the
-    runtime after the game folder (--config: its settings screen). appimage: a file name safe in the script (safe_name)"""
+    runtime after the game folder (--config: its settings screen). appimage: a file name safe in the script (safe_name); env: the profile's (NAME, VALUE) runtime settings
+    (deck.tsv env), exported before the runtime starts"""
     q = safe_name(appimage)
+    exports = ''.join(f"export {k}='{v}'\n" for k, v in env)
     return (f'#!/bin/sh\n# {name} ({title_id}), ported by nx2steamos for the Steam Deck: Savage Wind Recomp\'s runtime with the game\'s code recompiled from the player\'s files.\n'
             f'# Its saves, settings, shader caches and log (savagewind.log) are in ~/.local/share/nx2steamos/{title_id}. Launch options go to the runtime (--config: its settings).\n'
             'here=$(dirname "$(readlink -f "$0")")\n'
             f'run="$here/bin/{q}"\n'
             f'export SAVAGEWIND_DATA_ROOT="${{XDG_DATA_HOME:-$HOME/.local/share}}/nx2steamos/{title_id}"\n'
             'mkdir -p "$SAVAGEWIND_DATA_ROOT"\n'
+            + (f'# the game profile\'s runtime settings (deck.tsv env)\n{exports}' if exports else '') +
             'command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1 || export APPIMAGE_EXTRACT_AND_RUN=1\n'
             f'if [ "$(cat "$here/game/romfs.bin.key" 2>/dev/null)" != "{romfs_key}" ]; then\n'
             '  rm -f "$here/game/romfs.bin.key"\n'
@@ -133,7 +136,7 @@ def build_deck(dst, *, profile, version, display, name, engine_version, exefs, r
     for src in (gamelib, gamelib.with_name(gamelib.name + '.id')): shutil.copy2(src, tmp / 'game' / src.name); n += 1; b += src.stat().st_size   # copies: rebuilt in place
     app = tmp / 'bin' / safe_name(Path(appimage).name)
     (tmp / 'bin').mkdir(); shutil.copy2(appimage, app); app.chmod(0o755); n += 1; b += app.stat().st_size
-    (tmp / LAUNCHER).write_text(deck_launcher(name, profile.id, app.name, romfs_key), encoding='utf-8', newline='\n')
+    (tmp / LAUNCHER).write_text(deck_launcher(name, profile.id, app.name, romfs_key, getattr(profile, 'env', ())), encoding='utf-8', newline='\n')
     (tmp / LAUNCHER).chmod((tmp / LAUNCHER).stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     for kind, src in (art or {}).items(): link_or_copy(Path(src), tmp / 'art' / Path(src).name)
     gid = gamelib.with_name(gamelib.name + '.id').read_text().strip()

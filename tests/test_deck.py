@@ -64,11 +64,14 @@ class Knowledge(unittest.TestCase):
         self.assertEqual((p.id, p.status, p.name), (BOTW, 'untested', 'The Legend of Zelda: Breath of the Wild'))
         self.assertIn(BOTW, [q.id for q in deck.all_profiles()])
         totk = deck.profile(game.load('0100F2C0115B6000'))
-        self.assertEqual((totk.status, totk.sites), ('experimental', False))
+        self.assertEqual((totk.status, totk.sites, totk.env), ('experimental', False, [('SAVAGEWIND_NO_SCALE', '1'), ('SAVAGEWIND_HANDHELD', '1')]))
+        self.assertIn("export SAVAGEWIND_NO_SCALE='1'\n", gamedir.deck_launcher('Z', totk.id, 'r.AppImage', 'k', totk.env))
+        self.assertNotIn('export SAVAGEWIND_NO', gamedir.deck_launcher('B', BOTW, 'r.AppImage', 'k', p.env))
         with tempfile.TemporaryDirectory() as d:
             dst = Path(d) / BOTW; shutil.copytree(game.load(BOTW).dir, dst, ignore=shutil.ignore_patterns('*.tsv.conflicts.tsv'))
             g = game.load(str(dst))
-            for bad in ('status\tplayable\n', 'speed\t1\n', 'status\tfine\n', 'status\tboots\nstatus\tboots\n'):
+            for bad in ('status\tplayable\n', 'speed\t1\n', 'status\tfine\n', 'status\tboots\nstatus\tboots\n', 'env\tA\n',
+                        "env\tA=it's\n", 'env\tlower=1\n'):
                 (dst / 'deck.tsv').write_text(bad)
                 with self.assertRaises(steamos_profile.ProfileError, msg=bad): deck.DeckProfile(g)
             (dst / 'deck.tsv').write_text('status\tplayable\ntested\t1.9.0 Steam Deck OLED\n')

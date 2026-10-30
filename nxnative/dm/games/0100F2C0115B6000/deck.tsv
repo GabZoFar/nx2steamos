@@ -1,3 +1,9 @@
-# Tears of the Kingdom 1.4.3: the site-free game code compiles, but gameplay has not been tested on a Steam Deck.
+# Tears of the Kingdom 1.4.3 on the Steam Deck engine: runs on a Steam Deck (2026-10-30: menus, saves, the opening at 30 fps with sound); its picture is still being brought up.
 status	experimental
 sites	no
+# its render targets at the game's own sizes: scaled ones (BOTW's 1600x900 targets drawn at the window's size) broke its half-resolution
+# lighting's upsampling (speckled, blocky surfaces)
+env	SAVAGEWIND_NO_SCALE=1
+# handheld mode: at most 1280x720 rendered (docked: 1600x896 into a 1920x1080 output), what the Deck's 1280x800 screen
+# shows; it took the frame from ~30 ms of GPU time to ~17
+env	SAVAGEWIND_HANDHELD=1
