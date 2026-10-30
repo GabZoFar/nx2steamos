@@ -11,6 +11,14 @@
 // before it, the minimum follows the frame rate setting (Video > Frame rate: 60 or more, or no limit -> 1; 30 -> 2;
 // 30 too while a movie plays, as FPSLocker caps them); after it, the interval it chose paces the presents
 // (frame_timing_interval, runtime/nvn/objects.c present_pace), in place of the window's (which stays 2).
+//
+// What it measures (this + 0x120, 19.2 MHz ticks): the time its frame loop (main+0x2db8ac) spends in a callback of
+// its own (this + 0x158) at the frame's end, game work and a mutex; this + 0x128 is the GPU's time from its
+// timestamps, meaningless here (the renderer's counters carry no GPU time) and too large to count. In the opening's
+// caves that is ~18-20 ms on a Steam Deck, at the edge of a 60 fps frame: left to itself the game switched to 60 for
+// a few frames now and then and back (a judder). So 60 is allowed only after FAST_FRAMES frames in a row under
+// FAST_TICKS, and the minimum goes back to 2 at the first frame over SLOW_TICKS: a steady 30 there, 60 where the game
+// keeps up with it.
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +40,10 @@ static const struct {
 static GuestFn g_method;
 static uint64_t g_timing_off;
 static volatile int g_interval;  // the interval the game chose last (0: no such game, or not yet)
+static int g_fast;               // frames in a row whose time stayed under FAST_TICKS
+#define FAST_TICKS (14ull * 19200)
+#define SLOW_TICKS (16ull * 19200)
+#define FAST_FRAMES 120
 
 int frame_timing_interval(void) { return g_interval; }
 
@@ -40,6 +52,7 @@ static void timing_method(Cpu *c) {
     int fps = framepace_target();
     uint32_t min = fps == 0 || fps >= 60 ? 1 : fps >= 30 ? 2 : 3;
     if (__atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && min < 2) min = 2;
+    if (min < 2 && g_fast < FAST_FRAMES) min = 2;  // (60 only once the game has kept well under a 60th for a while)
     uint32_t *t = (uint32_t *)(uintptr_t)timing;
     // the minimum, and the lower interval its hysteresis steps down to (+0x44, set from the minimum when the game
     // starts: left at 2, the interval never went below it); the game's maximum stays above them
@@ -51,6 +64,9 @@ static void timing_method(Cpu *c) {
     c->x[30] = lr;
     uint32_t iv = t[0x40 / 4];
     if (iv >= 1 && iv <= 4) g_interval = (int)iv;
+    uint64_t took = *(const uint64_t *)(uintptr_t)(timing - g_timing_off + 0x120);
+    if (took < FAST_TICKS) { if (g_fast < FAST_FRAMES) g_fast++; }
+    else if (took > SLOW_TICKS) g_fast = 0;
     // SAVAGEWIND_LOG_FRAME_TIMING=1: every 120 frames, the interval and the two times the game measured (this + 0x120,
     // + 0x128, 19.2 MHz ticks; each + its margin in 60ths, timing + 8, + 0xc, must stay under one 60th for 60 fps)
     static int log = -1;
@@ -63,8 +79,8 @@ static void timing_method(Cpu *c) {
         if (m[1] > wb) wb = m[1];
         if (++n % 120 == 0) {
             const float *mg = (const float *)(uintptr_t)(timing + 8);
-            LOG("[frame] interval %u (min %u): times %.1f / %.1f ms average, %.1f / %.1f longest, margins %.2f / %.2f\n", iv, t[0],
-                sa / 120 / 19200.0, sb / 120 / 19200.0, wa / 19200.0, wb / 19200.0, mg[0], mg[1]);
+            LOG("[frame] interval %u (min %u, %d fast frames): times %.1f / %.1f ms average, %.1f / %.1f longest, margins %.2f / %.2f\n", iv,
+                t[0], g_fast, sa / 120 / 19200.0, sb / 120 / 19200.0, wa / 19200.0, wb / 19200.0, mg[0], mg[1]);
             sa = sb = wa = wb = 0;
         }
     }
@@ -72,6 +88,7 @@ static void timing_method(Cpu *c) {
 
 void frame_timing_boot(void) {
     g_interval = 0;
+    g_fast = 0;
     uint64_t base;
     const char *id = gamelib_main_build_id(&base);
     for (size_t i = 0; i < sizeof k_games / sizeof *k_games; i++) {
