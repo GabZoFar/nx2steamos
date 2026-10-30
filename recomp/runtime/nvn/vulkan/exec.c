@@ -902,7 +902,11 @@ static bool oq_counting;           // a SAMPLES_PASSED reset is in effect
 static uint32_t oq_run[OQ_RUN];    // the queries since that reset
 static int oq_nrun;
 typedef struct { uint64_t addr, seq, ts; int nq; uint32_t q[OQ_RUN]; } OqReport;
-static OqReport oq_reports[32];
+// (reports in flight: Tears of the Kingdom makes ~32 a frame, one per occlusion-tested draw, read a frame or two
+// later; a table of 32 filled up, and every report after that flushed the submission so far to make room: GPU idle
+// between the small submissions, 8 ms of a frame on a Steam Deck)
+#define OQ_REPORTS 512
+static OqReport oq_reports[OQ_REPORTS];
 static int oq_nreports;
 
 static bool oq_on(void) {
@@ -3247,7 +3251,29 @@ static bool gw_add(uint64_t lo, uint64_t hi) {  // false: no room
     return true;
 }
 
-static void gw_note(int stage) {  // a shader of this stage that stores to global memory was recorded
+// CopyBufferToBuffer within the heap (GPU memory mapped at its addresses): a copy on the GPU, in order with the rest of
+// the list, instead of waiting for everything submitted so far and copying on the CPU (Tears of the Kingdom makes one a
+// frame: 6-7 ms of waiting on a Steam Deck). The destination joins the memory the GPU writes (gw: the CPU's copies of
+// it wait for the GPU); overlapping ranges, memory outside the heap or a full set: the CPU copy, as before.
+static bool copy_buffer_gpu(uint64_t src, uint64_t dst, uint64_t size) {
+    if (!gmem_mapped || !gmem_buf || !size) return false;
+    if (src < HEAP_BASE || src + size > HEAP_BASE + gmem_size || dst < HEAP_BASE || dst + size > HEAP_BASE + gmem_size) return false;
+    if (src < dst + size && dst < src + size) return false;
+    if (!gw_add(dst, dst + size)) return false;
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkBufferCopy rg = {src - HEAP_BASE, dst - HEAP_BASE, size};
+    vkCmdCopyBuffer(cb, gmem_buf, gmem_buf, 1, &rg);
+    vk_full_barrier(cb);
+    return true;
+}
+
+// atomics_only: it writes only by reductions (RED). With no storage buffer bound, such a shader writes counters through
+// pointers of its own (Tears of the Kingdom's materials: ~1000 draws a minute each, its texture streaming's feedback,
+// read by the CPU after the frame's fence): memory this thread does not copy for draws, so it does not hold the list
+// (holding it after each left the GPU idle until the whole frame was translated).
+static void gw_note(int stage, bool atomics_only) {  // a shader of this stage that stores to global memory was recorded
     static int hold = -1;
     if (hold < 0) hold = getenv("SAVAGEWIND_VK_GMEM_HOLD") != NULL;
     if (chunk_hold) return;  // (the rest of the list goes in one piece anyway)
@@ -3259,7 +3285,7 @@ static void gw_note(int stage) {  // a shader of this stage that stores to globa
         ok = gw_add(r.addr, r.addr + r.size);
         n++;
     }
-    if (!ok || !n) { chunk_hold = true; stat_gw_holds++; }
+    if (!ok || (!n && !atomics_only)) { chunk_hold = true; stat_gw_holds++; }
 }
 
 // A constant buffer bound in place (in the set, in the heap, aligned for a uniform buffer descriptor), or false.
@@ -4083,7 +4109,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                 if (st.sbuf[5][i].addr) LOG(" %llx+%llx", (unsigned long long)st.sbuf[5][i].addr, (unsigned long long)st.sbuf[5][i].size);
             LOG("\n");
         }
-        gw_note(5);
+        gw_note(5, cp->si->gmem_atomics_only);
     }
 }
 
@@ -4791,8 +4817,8 @@ have_pipe:
     stat_draws++;
     chunk_draws++;
     if (pr->vi->writes_gmem || pr->fi->writes_gmem) {
-        if (pr->vi->writes_gmem) gw_note(0);
-        if (pr->fi->writes_gmem) gw_note(1);
+        if (pr->vi->writes_gmem) gw_note(0, pr->vi->gmem_atomics_only);
+        if (pr->fi->writes_gmem) gw_note(1, pr->fi->gmem_atomics_only);
         if (getenv("SAVAGEWIND_LOG_HOLD")) LOG("[hold] frame %llu draw %llu: vs %llx (%d) fs %llx (%d) fs hash %016llx\n",
                                                (unsigned long long)renderer_present_count(), (unsigned long long)stat_draws,
                                                (unsigned long long)st.program->stages[0].code_addr, pr->vi->writes_gmem,
@@ -6069,8 +6095,8 @@ static void exec_list(uint64_t handle, int depth) {
             uint64_t ts = frozen ? frame_ts : SDL_GetTicksNS();
             if (type == 1 && out && oq_on()) {  // SAMPLES_PASSED: written once the queries' submission is done
                 pthread_mutex_lock(&readback_lock);
-                if (oq_nreports == 32) { pthread_mutex_unlock(&readback_lock); renderer_flush(); pthread_mutex_lock(&readback_lock); oq_apply(); }
-                if (oq_nreports < 32) {
+                if (oq_nreports == OQ_REPORTS) { pthread_mutex_unlock(&readback_lock); renderer_flush(); pthread_mutex_lock(&readback_lock); oq_apply(); }
+                if (oq_nreports < OQ_REPORTS) {
                     OqReport *p = &oq_reports[oq_nreports++];
                     p->addr = r->x[1]; p->seq = vk_pending_seq(); p->ts = ts; p->nq = oq_nrun;
                     memcpy(p->q, oq_run, sizeof p->q[0] * (size_t)oq_nrun);
@@ -6090,6 +6116,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
         case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+            if (copy_buffer_gpu(r->x[0], r->x[1], r->x[2])) { guest_copy_flush(); break; }
             renderer_flush();
             kernel_watch_write("CopyBufferToBuffer", r->x[1], r->x[2]);
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);

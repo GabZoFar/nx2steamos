@@ -77,6 +77,7 @@ typedef struct {
     // GLSL (fields kept last: the MSL path's layout, including its out-of-range reg_used writes, is unchanged)
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
+    bool uses_gmem_stg;      // ... an STG among them (not only RED)
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
     bool uses_shared;        // LDS / STS: compute shared memory, smem_words words (a power of two)
     uint32_t smem_words;
@@ -1836,6 +1837,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 }
             } else {
                 c->uses_gmem_store = true;
+                c->uses_gmem_stg = true;
                 if (size < 4)
                     sp(&c->body, "      if (ok) { uint wi = uint(ga >> 2); uint sh = uint(ga & %s) * 8u; atomicAnd(gmem_.w[wi], ~(0x%xu << sh)); "
                        "atomicOr(gmem_.w[wi], (%s & 0x%xu) << sh); }\n", size < 2 ? "3ul" : "2ul", size < 2 ? 0xFFu : 0xFFFFu, R(d),
@@ -2255,6 +2257,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
     info->writes_gmem = info->uses_gmem && c->uses_gmem_store;
+    info->gmem_atomics_only = info->writes_gmem && !c->uses_gmem_stg;
     if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
@@ -2754,6 +2757,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     for (int i = 0; i < 18; i++)
         if (info->cbuf_mask & (1u << i)) sp(&args, ", constant uint4 *cb%d [[buffer(%d)]]", i, i);
     info->writes_gmem = info->uses_gmem && c->uses_gmem_store;
+    info->gmem_atomics_only = info->writes_gmem && !c->uses_gmem_stg;
     if (info->uses_gmem) {
         if (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX)) {
             free(args.buf);
