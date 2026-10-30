@@ -839,6 +839,7 @@ static bool writes_gpr(uint64_t w) {
         {0x5d20, 0xfff8}, {0x5090, 0xfff8}, {0x50a0, 0xfff8},  // HSETP2, PSETP, CSETP
         {0x38f0, 0xfef8}, {0x5cf0, 0xfff8}, {0x4cf0, 0xfff8},  // R2P
         {0xeff0, 0xfff8}, {0xeed8, 0xfff8}, {0xef50, 0xfff8}, {0xef58, 0xfff8},  // ST attribute, STG, STL, STS
+        {0xebf8, 0xfff8},                                                      // RED
         {0xe300, 0xfff0}, {0xe330, 0xfff0}, {0xe240, 0xfff0}, {0xe250, 0xfff0},  // EXIT, KIL, BRA, BRX
         {0xe290, 0xfff0}, {0xe2a0, 0xfff0}, {0xe2b0, 0xfff0}, {0xe340, 0xfff0}, {0xe350, 0xfff0},  // SSY PBK PCNT BRK CONT
         {0xf0f8, 0xfff8}, {0xf0f0, 0xfff8}, {0x50b0, 0xfff8}, {0xef98, 0xfff8}, {0xf0a8, 0xfff8},  // SYNC DEPBAR NOP MEMBAR BAR
@@ -1699,6 +1700,109 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {  // RED: atomic reduction in global memory
+        // [Ra(.E: Ra+1:Ra) + imm20] op= Rb (bits 0-7); size bits 20-22 (U32, S32), op bits 23-25 (ADD MIN MAX INC
+        // DEC AND OR XOR). Fields and semantics as Ryujinx's InstEmit.Red (MIT). Tears of the Kingdom's tiled lighting
+        // takes each tile's depth range with RED.E.MIN / RED.E.MAX.
+        int size = (int)bits(w, 20, 3), op = (int)bits(w, 23, 3);
+        int64_t off = sbits(w, 28, 20);
+        if (!c->glsl) { fail(c, "RED (MSL)"); return; }
+        if (size > 1) { fail(c, "RED size %d at %#x", size, pc); return; }
+        c->info->uses_gmem = true;
+        c->uses_gmem_store = true;
+        char addr[256];
+        if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
+        else if (bits(w, 48, 1)) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
+        else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
+        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
+           (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
+        const char *v = R((int)bits(w, 0, 8));
+        static const char *const native[] = {"atomicAdd", NULL, NULL, NULL, NULL, "atomicAnd", "atomicOr", "atomicXor"};
+        if (native[op]) sp(&c->body, "      if (ok) %s(gmem_.w[uint(ga >> 2)], %s);\n", native[op], v);
+        else if ((op == 1 || op == 2) && size == 0) sp(&c->body, "      if (ok) %s(gmem_.w[uint(ga >> 2)], %s);\n", op == 1 ? "atomicMin" : "atomicMax", v);
+        else {  // signed MIN / MAX, INC, DEC: a compare-and-swap loop
+            const char *nv = op == 1 ? "uint(min(int(o_), int(v_)))" : op == 2 ? "uint(max(int(o_), int(v_)))"
+                           : op == 3 ? "(o_ >= v_ ? 0u : o_ + 1u)" : "((o_ == 0u || o_ > v_) ? v_ : o_ - 1u)";
+            sp(&c->body, "      if (ok) { uint i_ = uint(ga >> 2); uint v_ = %s; uint o_ = gmem_.w[i_];\n"
+                         "        for (int k_ = 0; k_ < 64; k_++) { uint p_ = atomicCompSwap(gmem_.w[i_], o_, %s); if (p_ == o_) break; o_ = p_; } }\n",
+               v, nv);
+        }
+        sp(&c->body, "    }\n");
+    } else if (OPM(0x50d8000000000000ull, 0xfff8000000000000ull)) {  // VOTE.ALL / ANY / EQ
+        // Pd (bits 45-47) = the vote of the source predicate (bits 39-42) over the warp, Rd = its ballot. A warp is 32
+        // lanes; with a 64-lane subgroup (RADV) the lane's half of the ballot stands for it (Ryujinx's EmitBallot).
+        if (!c->glsl) { fail(c, "VOTE (MSL)"); return; }
+        int mode = (int)bits(w, 48, 2), pd = (int)bits(w, 45, 3);
+        sp(&c->body, "    { uvec4 b_ = subgroupBallot(%s); uvec4 a_ = subgroupBallot(true); uint h_ = (gl_SubgroupInvocationID >> 5) & 3u;\n"
+                     "      uint bm_ = b_[h_], am_ = a_[h_];\n", P((int)bits(w, 39, 3), bits(w, 42, 1)));
+        if (pd != PT) {
+            static const char *const vote[] = {"bm_ == am_", "bm_ != 0u", "bm_ == am_ || bm_ == 0u", "false"};
+            c->pred_used[pd] = 1;
+            sp(&c->body, "      p%d = %s;\n", pd, vote[mode]);
+        }
+        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = bm_;\n", d); }
+        sp(&c->body, "    }\n");
+    } else if (OPM(0x3a00000000000000ull, 0xfe00000000000000ull)) {  // VMNMX: video (byte / half) min / max
+        // As Ryujinx's InstEmit.Vmnmx (MIT): A and B extended by their selects (bit 3 signed; 0-3 a byte, 4-5 a half,
+        // 6 the word), min or max (MN, bit 56) in the signedness they share, saturation (bit 55), then the secondary
+        // operation with C (bits 51-53: MRG_16H MRG_16L MRG_8B0 MRG_8B2 ACC MIN MAX).
+        int asel = (int)(((w >> 45) & 8) | ((w >> 36) & 7)), bsel = (int)(((w >> 46) & 8) | ((w >> 28) & 7));
+        bool mn = bits(w, 56, 1), sat = bits(w, 55, 1), dfmt = bits(w, 54, 1);
+        int vop = (int)bits(w, 51, 3);
+        char ea[160], eb[160], cc[96], x[1024], y[1400];
+        const char *ra = R(a);
+        int sh = (asel & 3) * 8;
+        if ((asel & 7) <= 3) sprintf(ea, (asel & 8) ? "uint(int(%s << %du) >> 24)" : "((%s >> %du) & 0xFFu)", ra, (asel & 8) ? 24 - sh : sh);
+        else if ((asel & 7) <= 5) sprintf(ea, (asel & 8) ? "uint(int(%s << %du) >> 16)" : "((%s >> %du) & 0xFFFFu)", ra, (asel & 8) ? ((asel & 1) ? 0 : 16) : ((asel & 1) ? 16 : 0));
+        else sprintf(ea, "%s", ra);
+        if (bits(w, 50, 1)) {
+            const char *rb = R((int)bits(w, 20, 8));
+            sh = (bsel & 3) * 8;
+            if ((bsel & 7) <= 3) sprintf(eb, (bsel & 8) ? "uint(int(%s << %du) >> 24)" : "((%s >> %du) & 0xFFu)", rb, (bsel & 8) ? 24 - sh : sh);
+            else if ((bsel & 7) <= 5) sprintf(eb, (bsel & 8) ? "uint(int(%s << %du) >> 16)" : "((%s >> %du) & 0xFFFFu)", rb, (bsel & 8) ? ((bsel & 1) ? 0 : 16) : ((bsel & 1) ? 16 : 0));
+            else sprintf(eb, "%s", rb);
+        } else {
+            uint32_t imm = (uint32_t)bits(w, 20, 16);
+            if ((bsel & 8) && (imm & 0x8000u)) imm |= 0xFFFF0000u;
+            sprintf(eb, "0x%08xu", imm);
+        }
+        sprintf(cc, "%s", R((int)bits(w, 39, 8)));
+        bool sgn;
+        if ((asel & 8) != (bsel & 8)) {
+            sgn = !mn;
+            sprintf(x, mn ? "max(%s, %s)" : "uint(min(int(%s), int(%s)))", ea, eb);
+            const char *neg = (asel & 8) ? eb : ea;
+            sprintf(y, "(int(%s) < 0 ? %s : %s)", neg, neg, x);
+            strcpy(x, y);
+        } else {
+            sgn = (asel & 8) != 0;
+            if (sgn) sprintf(x, "uint(%s(int(%s), int(%s)))", mn ? "max" : "min", ea, eb);
+            else sprintf(x, "%s(%s, %s)", mn ? "max" : "min", ea, eb);
+        }
+        if (sat && dfmt && !sgn) { sprintf(y, "min(%s, 0x7FFFFFFFu)", x); strcpy(x, y); }
+        else if (sat && !dfmt && sgn) { sprintf(y, "uint(max(int(%s), 0))", x); strcpy(x, y); }
+        switch (vop) {
+        case 0: sprintf(y, "((%s & 0x0000FFFFu) | (%s << 16))", cc, x); break;
+        case 1: sprintf(y, "((%s & 0xFFFF0000u) | (%s & 0xFFFFu))", cc, x); break;
+        case 2: sprintf(y, "((%s & 0xFFFFFF00u) | (%s & 0xFFu))", cc, x); break;
+        case 3: sprintf(y, "((%s & 0xFF00FFFFu) | ((%s & 0xFFu) << 16))", cc, x); break;
+        case 4: sprintf(y, "(%s + %s)", x, cc); break;
+        case 5: sprintf(y, dfmt ? "uint(min(int(%s), int(%s)))" : "min(%s, %s)", x, cc); break;
+        case 6: sprintf(y, dfmt ? "uint(max(int(%s), int(%s)))" : "max(%s, %s)", x, cc); break;
+        default: strcpy(y, x);
+        }
+        set_reg(c, d, y);
+    } else if (OPM(0x5bd8000000000000ull, 0xfff8000000000000ull) || OPM(0x1800000000000000ull, 0xfc00000000000000ull)) {  // LEA.HI
+        // Rd = ((Rc:Ra) << shift).hi + B, B a register (0x5bd8) or a constant (0x18: c[bits 34-38][bits 20-33]); shift
+        // bits 51-55 (0x18) / 28-32 (0x5bd8). As Ryujinx's EmitLeaHi (MIT); the negated and extended forms are not.
+        bool cform = (w >> 58) == 0x6;
+        int shift = cform ? (int)bits(w, 51, 5) : (int)bits(w, 28, 5);
+        if (bits(w, cform ? 56 : 45, 1) || (cform && bits(w, 57, 1))) { fail(c, "LEA.HI neg/X at %#x", pc); return; }
+        const char *rb = cform ? cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, alloca(128)) : R((int)bits(w, 20, 8));
+        const char *rc = R((int)bits(w, 39, 8));
+        if (shift == 0) sprintf(t, "(%s + %s)", rc, rb);
+        else sprintf(t, "(((%s >> %du) | (%s << %du)) + %s)", R(a), 32 - shift, rc, shift, rb);
+        set_reg(c, d, t);
     } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
         bool store = bits(w, 51, 1);
         bool wide = bits(w, 45, 1);
@@ -2021,6 +2125,7 @@ static const char glsl_prelude[] =
     "#version 460\n"
     "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n"
     "#extension GL_KHR_shader_subgroup_basic : require\n"
+    "#extension GL_KHR_shader_subgroup_ballot : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
@@ -2285,8 +2390,17 @@ static size_t code_end(const uint8_t *code, size_t n) {
     return end;
 }
 
+// Where the instructions start: after the NVN header (0x30) and the SPH (0x50) for the graphics stages. Compute
+// programs have no SPH: their code starts at the blob, or, after the compute form of the NVN header (magic
+// 0x12345679, then zeros to 0x100: Tears of the Kingdom's programs), at +0x100. (The size and hash of a binary
+// count from here too: from the blob, every such program looked the same and they shared one translation.)
+static size_t code_offset(const uint8_t *blob, int stage) {
+    if (stage != STAGE_COMPUTE) return 0x80;
+    return *(const uint32_t *)blob == 0x12345679 ? 0x100 : 0;
+}
+
 size_t maxwell_binary_size(const uint8_t *blob, size_t max_size, int stage) {
-    size_t head = stage == STAGE_COMPUTE ? 0 : 0x80;
+    size_t head = code_offset(blob, stage);
     if (max_size <= head) return max_size;
     return head + code_end(blob + head, (max_size - head) / 8) * 8;
 }
@@ -2515,9 +2629,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     uint32_t sw = key && key->shared_size ? (key->shared_size + 3) / 4 : 256;
     for (c->smem_words = 1; c->smem_words < sw && c->smem_words < 8192; c->smem_words *= 2) {}
     const uint8_t *sph = blob + 0x30;
-    const uint8_t *code = blob + 0x80;
-    // compute programs have neither the 0x30-byte NVN header nor an SPH: code starts at the blob
-    if (stage == STAGE_COMPUTE) code = blob;
+    const uint8_t *code = blob + code_offset(blob, stage);
     c->code = code;
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
