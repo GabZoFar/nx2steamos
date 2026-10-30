@@ -3,7 +3,7 @@
 #   arm64 (the ARM64 engine): the host built with clang and with Zig, the host's unit tests on glibc, the rewriter's tests, the porter's tests, movies through FFmpeg,
 #                             and the probes on lavapipe
 #   amd64 (the Steam Deck engine, recomp/): the runtime built for x86-64, and its game-free tests: module layout, site patterns, the FP / SIMD lowering against Unicorn,
-#                             the software FMA, the shader translator through shaderc and SPIRV-Tools; then the porter's game code for it, loaded in that runtime
+#                             whole generated functions against Unicorn (tools/test_gen_functions.py), the software FMA, the shader translator through shaderc and SPIRV-Tools; then the porter's game code for it, loaded in that runtime
 #                             (devtools/deck_porter_check.sh)
 # Run from the repository on any machine with Docker (on an Apple-silicon Mac the amd64 half runs under Docker Desktop's x86-64 emulation):
 #   sh devtools/check.sh [<title ID>]     both halves (the ARM64 host built for that game, Mario vs. Donkey Kong by default)
@@ -40,6 +40,7 @@ echo '== Steam Deck engine: runtime for x86-64'; make -j\$(nproc) >/tmp/make.log
 echo '== layout';     python3 tools/test_layout.py 2>&1 | tail -1
 echo '== sites';      python3 tools/test_game_sites.py 2>&1 | tail -1
 echo '== FP / SIMD against Unicorn'; python3 tools/test_simd.py --jobs \$(nproc) 2>&1 | tail -1
+echo '== whole functions against Unicorn'; CC=clang python3 tools/test_gen_functions.py 1200 1 2>&1 | tail -1
 echo '== software FMA'; clang -O1 -mfma -Iruntime tools/test_softfma.c -o build/test_softfma -lm && build/test_softfma 2>&1 | tail -1
 echo '== shader translator'; T=build/test_translate; mkdir -p \$T/dump; rm -f \$T/dump/* \$T/log_*.txt
 clang -O2 -Wall -c runtime/nvn/maxwell/translate.c -o \$T/new.o && clang -O2 -Wall -DWITH_GLSL -c tools/test_translate.c -o \$T/t.o
