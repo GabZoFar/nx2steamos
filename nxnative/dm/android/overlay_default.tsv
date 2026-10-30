@@ -1,0 +1,25 @@
+# The on-screen gamepad's default layout (dm/android/overlay_layout.h draws and hit-tests it). A game profile's android.tsv moves single controls with `overlay <name> <x> <y> [<r>]`;
+# dm/android/tools/android_profile.py compiles the result into android_profile.h (DM_AOV_TABLE). Columns, separated by tabs:
+#   name     what android.tsv calls the control
+#   kind     stick_l, stick_r, button, dpad, menu (the menu button: pauses the game and opens the settings; always shown)
+#   x, y     the centre, as fractions of the window's width and height
+#   r        the radius, as a fraction of the window's height (round controls stay round on any aspect); L, R, ZL and ZR are drawn as shoulder buttons
+#            this radius sizes (overlay_layout.h ov_sdf), and a small control still takes touches OV_REACH_MIN from its centre
+#   button   the DM_BTN_* bit a button sends, - for the others
+#   label    the text drawn on a button, ~ for none
+stick_l	stick_l	0.12	0.70	0.12	-	~
+stick_r	stick_r	0.74	0.80	0.09	-	~
+a	button	0.935	0.60	0.050	DM_BTN_A	A
+b	button	0.885	0.72	0.050	DM_BTN_B	B
+x	button	0.885	0.48	0.050	DM_BTN_X	X
+y	button	0.835	0.60	0.050	DM_BTN_Y	Y
+l	button	0.06	0.12	0.050	DM_BTN_L	L
+zl	button	0.06	0.30	0.050	DM_BTN_ZL	ZL
+r	button	0.94	0.12	0.050	DM_BTN_R	R
+zr	button	0.94	0.30	0.050	DM_BTN_ZR	ZR
+minus	button	0.42	0.08	0.020	DM_BTN_MINUS	-
+plus	button	0.58	0.08	0.020	DM_BTN_PLUS	+
+menu	menu	0.50	0.08	0.018	-	~
+dpad	dpad	0.30	0.80	0.10	-	~
+ls	button	0.20	0.42	0.040	DM_BTN_LS	LS
+rs	button	0.62	0.62	0.040	DM_BTN_RS	RS
