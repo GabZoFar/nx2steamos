@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Savage Wind's icon (original art): a frozen mountain, a plain sword planted in its summit, wind over it -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#081427"/>
+      <stop offset="0.5" stop-color="#173f69"/>
+      <stop offset="1" stop-color="#6fb6da"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#e9f8ff" stop-opacity="0.8"/>
+      <stop offset="0.45" stop-color="#9fdcff" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#9fdcff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5d8fb8"/>
+      <stop offset="1" stop-color="#2b5679"/>
+    </linearGradient>
+    <linearGradient id="rockL" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4475a0"/>
+      <stop offset="1" stop-color="#1d3d5e"/>
+    </linearGradient>
+    <linearGradient id="rockR" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b3856"/>
+      <stop offset="1" stop-color="#0e2238"/>
+    </linearGradient>
+    <linearGradient id="snowL" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d6eefb"/>
+    </linearGradient>
+    <linearGradient id="snowR" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c3e2f4"/>
+      <stop offset="1" stop-color="#8fbcd9"/>
+    </linearGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#eef6ff"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="0.5" stop-color="#b3c6da"/>
+      <stop offset="1" stop-color="#7d93ad"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f1f6fb"/>
+      <stop offset="1" stop-color="#8293a8"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6b4527"/>
+      <stop offset="1" stop-color="#3a2414"/>
+    </linearGradient>
+    <clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#sky)"/>
+    <!-- stars -->
+    <g fill="#eaf6ff">
+      <circle cx="210" cy="230" r="5"/><circle cx="300" cy="175" r="3.5"/><circle cx="812" cy="205" r="4.5"/>
+      <circle cx="752" cy="300" r="3"/><circle cx="250" cy="345" r="3"/><circle cx="866" cy="360" r="2.6"/>
+    </g>
+    <!-- light behind the sword -->
+    <circle cx="512" cy="390" r="300" fill="url(#halo)"/>
+    <!-- far peaks -->
+    <path d="M100 760 L210 620 L280 680 L360 580 L430 660 L512 700 L600 650 L670 570 L750 660 L830 605 L924 700 L924 924 L100 924 Z"
+          fill="url(#far)" opacity="0.9"/>
+    <path d="M330 612 L360 580 L392 616 L374 626 L360 612 L346 626 Z M640 605 L670 570 L702 608 L684 616 L670 600 L656 618 Z"
+          fill="#e4f4fd" opacity="0.85"/>
+    <!-- the mountain: lit left face, shadowed right face, a ridge between them -->
+    <path d="M100 924 L100 880 L230 770 L300 790 L420 625 L512 515 L560 924 Z" fill="url(#rockL)"/>
+    <path d="M512 515 L600 612 L660 598 L790 760 L924 840 L924 924 L560 924 Z" fill="url(#rockR)"/>
+    <!-- snow and ice -->
+    <path d="M512 515 L420 625 L394 668 L440 652 L466 700 L498 664 L532 690 Z" fill="url(#snowL)"/>
+    <path d="M512 515 L600 612 L628 664 L588 650 L562 696 L532 690 Z" fill="url(#snowR)"/>
+    <path d="M230 770 L300 790 L276 828 L252 808 L216 838 L198 800 Z" fill="url(#snowL)" opacity="0.95"/>
+    <path d="M660 598 L790 760 L752 752 L724 786 L702 728 L672 750 Z" fill="url(#snowR)" opacity="0.9"/>
+    <path d="M512 515 L470 595 L512 587 Z" fill="#ffffff"/>
+    <path d="M512 515 L512 587 L556 599 Z" fill="#d7ecf8"/>
+    <path d="M420 625 L452 621 L430 665 Z" fill="#eaf7ff" opacity="0.8"/>
+    <!-- wind behind the sword -->
+    <g fill="none" stroke="#f2fbff" stroke-linecap="round">
+      <path d="M120 470 C 230 442, 330 490, 430 460" stroke-width="10" opacity="0.55"/>
+      <path d="M430 460 c 26 -14 64 -6 66 20 c 2 20 -22 30 -36 18 c -10 -9 -3 -24 10 -21" stroke-width="10" opacity="0.55"/>
+      <path d="M600 432 C 700 410, 790 446, 904 420" stroke-width="9" opacity="0.45"/>
+    </g>
+    <!-- the sword, planted in the summit -->
+    <g>
+      <path d="M476 340 L548 340 L548 590 L512 630 L476 590 Z" fill="url(#blade)" stroke="#4f6683" stroke-width="5"
+            stroke-linejoin="round"/>
+      <path d="M512 350 L512 586" stroke="#ffffff" stroke-width="5" opacity="0.6"/>
+      <rect x="382" y="304" width="260" height="44" rx="14" fill="url(#steel)" stroke="#4f6683" stroke-width="5"/>
+      <rect x="489" y="208" width="46" height="100" rx="12" fill="url(#grip)" stroke="#2a190c" stroke-width="5"/>
+      <path d="M492 232 L532 244 M492 258 L532 270 M492 284 L532 296" stroke="#8a5d36" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="512" cy="196" r="28" fill="url(#steel)" stroke="#4f6683" stroke-width="5"/>
+    </g>
+    <!-- snow drifted over the blade's foot -->
+    <path d="M446 592 Q480 568 512 582 Q546 566 580 594 Q546 612 512 604 Q480 614 446 592 Z" fill="#ffffff"/>
+    <!-- wind over the slopes -->
+    <path d="M150 860 C 300 830, 420 880, 560 846 S 800 820, 920 840" fill="none" stroke="#f2fbff" stroke-width="8"
+          stroke-linecap="round" opacity="0.4"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="4"/>
+</svg>
