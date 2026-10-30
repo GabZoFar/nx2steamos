@@ -2,8 +2,10 @@
 // decode bit for bit (the decode_unorm8 path its CLI uses for -dl / -ds into 8-bit images):
 //   endpoints expand to 16 bits (linear: v * 257, sRGB: v << 8 | 0x80, all four channels),
 //   texel = (e0 * (64 - w) + e1 * w + 32) >> 6, output = top 8 bits.
-// Error blocks (illegal encodings, HDR void extents) -> magenta; HDR endpoint modes -> magenta
-// endpoints for that partition only (as astcenc and the spec's LDR profile do).
+// Error blocks (illegal encodings, HDR void extents) -> transparent black, where astcenc and the spec give magenta:
+// Tears of the Kingdom's textures hold all-zero blocks (an illegal encoding: whole mip chains of its texture arrays,
+// a few blocks of some level 0s) that the Switch's GPU shows as nothing, and magenta from them tinted the light
+// probes and so the whole scene. HDR endpoint modes -> magenta endpoints for that partition only (as astcenc does).
 #include "astc.h"
 
 #include <string.h>
@@ -363,11 +365,7 @@ static bool unpack_endpoints(int cem, const uint8_t *v, int e0[4], int e1[4]) {
 
 // ---- block ----
 
-static void fill_error(uint8_t *out, int texels) {
-    for (int i = 0; i < texels; i++) {
-        out[4 * i + 0] = 0xFF; out[4 * i + 1] = 0x00; out[4 * i + 2] = 0xFF; out[4 * i + 3] = 0xFF;
-    }
-}
+static void fill_error(uint8_t *out, int texels) { memset(out, 0, (size_t)texels * 4); }
 
 bool astc_decode_block(const uint8_t block[16], uint32_t bw, uint32_t bh, bool srgb, uint8_t *out) {
     if (bw < 4 || bh < 4 || bw > 12 || bh > 12) return false;  // not an ASTC 2D footprint

@@ -7,9 +7,10 @@
 // blocks: row-major 16-byte blocks covering ceil(width/bw) x ceil(height/bh).
 // rgba_out: width*height*4 bytes, tightly packed rows. Values are the 8-bit UNORM results (no sRGB
 // -> linear conversion; srgb only selects the sRGB endpoint expansion, which changes rounding).
-// Error / illegal blocks and HDR content decode to magenta (FF 00 FF FF).
+// Error / illegal blocks decode to transparent black (as the Switch shows them; astcenc: magenta), HDR endpoint
+// modes to magenta.
 void astc_decode_ldr(const uint8_t *blocks, uint32_t width, uint32_t height, uint32_t bw, uint32_t bh,
                      bool srgb, uint8_t *rgba_out);
 
-// One block -> bw*bh*4 bytes (rows of bw texels). Returns false for an error block (output magenta).
+// One block -> bw*bh*4 bytes (rows of bw texels). Returns false for an error block (output transparent black).
 bool astc_decode_block(const uint8_t block[16], uint32_t bw, uint32_t bh, bool srgb, uint8_t *rgba_out);

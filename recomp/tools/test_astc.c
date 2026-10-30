@@ -352,7 +352,8 @@ static int mode_cmp(const char *astc_path, const char *tga_path, int srgb) {
     if (aw != w || ah != h) { printf("cmp: size mismatch\n"); return 2; }
     uint8_t *ours = malloc((size_t)w * h * 4);
     astc_decode_ldr(d + 16, w, h, bw, bh, srgb, ours);
-    // astcenc's CLI writes error texels (NaN) as 0 after its [0,1] clamp: count those separately
+    // astcenc's CLI writes error texels (NaN) as 0 after its [0,1] clamp, as ours are now (runtime/nvn/astc.c); a magenta
+    // texel against its 0 (the decoder's former error colour) is still counted apart
     long bad = 0, err_texels = 0;
     for (long i = 0; i < (long)w * h; i++) {
         const uint8_t *p = ours + 4 * i, *q = ref + 4 * i;
