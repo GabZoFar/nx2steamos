@@ -1750,6 +1750,7 @@ static void translate_program(void *arg) {
     uint64_t pt0 = SDL_GetTicksNS();
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem2_base = ALIAS_BASE;
     pthread_mutex_lock(&translate_lock);
     {   // SAVAGEWIND_DBG_FS=<fs code addr hex>:<pc hex>:<reg>: that register after that instruction, as every output
         // (pc ffffffff: 1.0, where the shader runs at all), as in renderer.m. The shader can also be named
@@ -3099,16 +3100,9 @@ static bool gmem_mapped;     // the heap is GPU memory mapped at its addresses (
 // heap, makes host-cached GPU memory of its size, exported as a dma-buf, and maps that over the heap's addresses;
 // the shaders' global memory and the vertex reads use it in place, as they did the import. RADV only (the drivers
 // that showed the cost); SAVAGEWIND_VK_HEAP_IMPORT=1: the import, as before.
-void backend_heap_set(uint64_t size) {
-    static int off = -1;
-    if (off < 0) off = getenv("SAVAGEWIND_VK_HEAP_IMPORT") != NULL || getenv("SAVAGEWIND_VK_NO_GMEM") != NULL;
-    if (gmem_mapped && size > gmem_size)
-        LOG("[vk] guest heap grew to %llu MB past the %llu MB mapped: the rest is copied, not shared\n",
-            (unsigned long long)(size >> 20), (unsigned long long)(gmem_size >> 20));
-    if (off || gmem_mapped || gmem_buf || !size) return;
-    vk_wait_ready();
-    if (!g_vk.dmabuf || !g_vk.radv) return;
-    size = (size + 0x1FFFFF) & ~0x1FFFFFull;  // (2 MB pages)
+// GPU memory mapped over [addr, addr + size) of the guest's address space (host-cached, exported as a dma-buf and
+// mapped there), and a buffer over all of it: false (nothing changed) when any step fails.
+static bool gpu_memory_at(uint64_t addr, uint64_t size, const char *what, VkDeviceMemory *mem_out, VkBuffer *buf_out, uint32_t *type_out) {
     uint32_t type = UINT32_MAX;
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
@@ -3121,29 +3115,29 @@ void backend_heap_set(uint64_t size) {
                 type = i;
         }
     PFN_vkGetMemoryFdKHR get_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdKHR");
-    if (type == UINT32_MAX || !get_fd) return;
+    if (type == UINT32_MAX || !get_fd) return false;
     VkExportMemoryAllocateInfo ex = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ex, .allocationSize = size,
                                .memoryTypeIndex = type};
     VkDeviceMemory mem;
     VkResult r = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
-    if (r != VK_SUCCESS) { LOG("[vk] guest heap as GPU memory: allocation failed (%d), imported instead\n", r); return; }
+    if (r != VK_SUCCESS) { LOG("[vk] %s as GPU memory: allocation failed (%d)\n", what, r); return false; }
     VkMemoryGetFdInfoKHR gi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
                                .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     int fd = -1;
     if (get_fd(g_vk.dev, &gi, &fd) != VK_SUCCESS || fd < 0) {
-        LOG("[vk] guest heap as GPU memory: no dma-buf, imported instead\n");
+        LOG("[vk] %s as GPU memory: no dma-buf\n", what);
         vkFreeMemory(g_vk.dev, mem, NULL);
-        return;
+        return false;
     }
-    void *p = mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+    void *p = mmap((void *)(uintptr_t)addr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
     close(fd);  // (the mapping keeps the dma-buf)
-    if (p != (void *)(uintptr_t)HEAP_BASE) {
-        LOG("[vk] guest heap as GPU memory: mapping failed, imported instead\n");
-        mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+    if (p != (void *)(uintptr_t)addr) {
+        LOG("[vk] %s as GPU memory: mapping failed\n", what);
+        mmap((void *)(uintptr_t)addr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
         vkFreeMemory(g_vk.dev, mem, NULL);
-        return;
+        return false;
     }
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
@@ -3152,16 +3146,60 @@ void backend_heap_set(uint64_t size) {
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};
     VkBuffer buf;
-    VK_CHECK(vkCreateBuffer(g_vk.dev, &bi, NULL, &buf));  // (the heap is mapped now: no way back)
+    VK_CHECK(vkCreateBuffer(g_vk.dev, &bi, NULL, &buf));  // (the range is mapped now: no way back)
     VK_CHECK(vkBindBufferMemory(g_vk.dev, buf, mem, 0));
-    gmem_buf = buf;
-    gmem_mem = mem;
+    *mem_out = mem;
+    *buf_out = buf;
+    *type_out = type;
+    return true;
+}
+
+void backend_heap_set(uint64_t size) {
+    static int off = -1;
+    if (off < 0) off = getenv("SAVAGEWIND_VK_HEAP_IMPORT") != NULL || getenv("SAVAGEWIND_VK_NO_GMEM") != NULL;
+    if (gmem_mapped && size > gmem_size)
+        LOG("[vk] guest heap grew to %llu MB past the %llu MB mapped: the rest is copied, not shared\n",
+            (unsigned long long)(size >> 20), (unsigned long long)(gmem_size >> 20));
+    if (off || gmem_mapped || gmem_buf || !size) return;
+    vk_wait_ready();
+    if (!g_vk.dmabuf || !g_vk.radv) return;
+    size = (size + 0x1FFFFF) & ~0x1FFFFFull;  // (2 MB pages)
+    uint32_t type;
+    if (!gpu_memory_at(HEAP_BASE, size, "guest heap", &gmem_mem, &gmem_buf, &type)) return;  // (imported instead)
     gmem_size = size;
     gmem_mapped = true;
     LOG("[vk] guest heap is GPU memory (dma-buf mapped at the heap, type %u): %llu MB\n", type, (unsigned long long)(size >> 20));
 }
+
+// Tears of the Kingdom keeps 564 of its memory pools (273 MB: vertex, index and constant data, and memory its shaders
+// read and write through pointers) in the alias region, as physical memory it maps there (kernel.c map_physical), not
+// in the heap. The shaders' global memory reached the heap only: their accesses there read 0 and their writes were
+// lost, and the vertex data was copied at every draw. So the alias region's first ALIAS_GPU_SPAN bytes are GPU memory
+// mapped there too, made at the game's first MapPhysicalMemory (before anything is in it): the shaders' second window
+// of global memory (GMEM2_BUFFER_INDEX, maxwell_gmem2_base) and vertex data read in place. SAVAGEWIND_VK_NO_ALIAS_GMEM=1:
+// not (the second window then reads an empty buffer).
+#define ALIAS_GPU_SPAN 0x80000000ull
+static VkBuffer alias_buf;
+static VkDeviceMemory alias_mem;
+static uint64_t alias_size;
+void backend_alias_set(void) {
+    static bool tried;
+    if (tried) return;
+    tried = true;
+    if (getenv("SAVAGEWIND_VK_NO_ALIAS_GMEM") || getenv("SAVAGEWIND_VK_NO_GMEM")) return;
+    vk_wait_ready();
+    if (!g_vk.dmabuf || !g_vk.radv) return;
+    uint32_t type;
+    if (!gpu_memory_at(ALIAS_BASE, ALIAS_GPU_SPAN, "alias region", &alias_mem, &alias_buf, &type)) return;
+    alias_size = ALIAS_GPU_SPAN;
+    LOG("[vk] alias region is GPU memory (dma-buf mapped at %llx, type %u): %llu MB\n", (unsigned long long)ALIAS_BASE, type,
+        (unsigned long long)(alias_size >> 20));
+}
 #else
 void backend_heap_set(uint64_t size) { (void)size; }
+void backend_alias_set(void) {}
+static VkBuffer alias_buf;
+static uint64_t alias_size;
 #endif
 
 static VkDescriptorBufferInfo gmem_info(void) {
@@ -3179,13 +3217,33 @@ static VkDescriptorBufferInfo gmem_info(void) {
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof zero};
 }
 
+// The second window of global memory (GMEM2_BUFFER_INDEX): the alias region's GPU memory, or a buffer of its own
+// of 16 bytes (the shaders bound their accesses by its length: nothing outside it is read or written).
+static VkDescriptorBufferInfo alias_info(void) {
+    if (alias_buf) return (VkDescriptorBufferInfo){alias_buf, 0, alias_size};
+    static VkBuffer none;
+    static VmaAllocation none_mem;
+    if (!none) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO};
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &none, &none_mem, NULL));
+    }
+    return (VkDescriptorBufferInfo){none, 0, 16};
+}
+
 // Vertex / index data read in place from the imported guest heap (renderer.m bind_guest does the same with
 // g_guest_buffer): no per-draw copy, no index scan for the copy size. The game fences its CPU writes as on the
 // Switch. Falls back to copies outside the heap or without the import; SAVAGEWIND_VK_COPY_VERTICES=1 forces copies.
 static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     static int copy = -1;
     if (copy < 0) copy = getenv("SAVAGEWIND_VK_COPY_VERTICES") != NULL;
-    if (copy || addr < HEAP_BASE) return false;
+    if (copy) return false;
+    if (alias_buf && addr >= ALIAS_BASE && addr + size <= ALIAS_BASE + alias_size) {  // (the alias region's GPU memory)
+        *buf = alias_buf;
+        *off = addr - ALIAS_BASE;
+        return true;
+    }
+    if (addr < HEAP_BASE) return false;
     if (!gmem_mapped && addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     *buf = gmem_buf;
@@ -3520,7 +3578,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n].offset = 0;
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-            bi[n] = gmem_info();
+            bi[n] = b->binding == GMEM2_BUFFER_INDEX ? alias_info() : gmem_info();
             w[n].pBufferInfo = &bi[n];
         } else {
             continue;  // rscale / tint: written below, once the textures (and their scales) are known
@@ -3648,6 +3706,7 @@ static CsProg *compute_program(NvnProgram *np) {
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem2_base = ALIAS_BASE;
     ShaderKey k = {0};
     k.glsl = 1;
     k.shared_size = ss->control ? *(const uint32_t *)(ss->control + 0x754) : 0;  // (next to the group size at 0x748)

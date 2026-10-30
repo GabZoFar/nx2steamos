@@ -78,7 +78,9 @@ typedef struct {
 
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
+#define GMEM2_BUFFER_INDEX 20  // (GLSL) the second window of global memory, from maxwell_gmem2_base
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+extern uint64_t maxwell_gmem2_base;
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;

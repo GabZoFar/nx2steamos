@@ -1146,10 +1146,24 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = v;
         break;
     }
-    case 0x2C:  // MapPhysicalMemory(addr, size)
+    case 0x2C: {  // MapPhysicalMemory(addr, size)
+        // the renderer may back the alias region with GPU memory (Linux, exec.c backend_alias_set): at the first,
+        // before anything is in the region
+        static bool alias_seen;
+        if (!alias_seen) {
+            alias_seen = true;
+            bool empty = true;
+            pthread_mutex_lock(&g_regions_lock);
+            for (int i = 0; i < nregions; i++)
+                if (regions[i].addr < ALIAS_BASE + ALIAS_SIZE && regions[i].addr + regions[i].size > ALIAS_BASE) empty = false;
+            pthread_mutex_unlock(&g_regions_lock);
+            void backend_alias_set(void);
+            if (empty) backend_alias_set();
+        }
         map_physical(x[0], x[1]);
         x[0] = R_OK;
         break;
+    }
     case 0x2D:  // UnmapPhysicalMemory(addr, size)
         unmap_physical(x[0], x[1]);
         x[0] = R_OK;

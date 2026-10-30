@@ -62,6 +62,7 @@ static void *worker(void *arg) {
     Work *w = arg;
     maxwell_gmem_base = HEAP_BASE;  // (as the game translates: global memory relative to the guest heap)
     maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem2_base = ALIAS_BASE;  // (the second window: exec.c backend_alias_set)
     for (int i; !atomic_load(&w->p->cancel) && (i = atomic_fetch_add(&w->next, 1)) < w->njobs;) {
         const Job *j = &w->jobs[i];
         const SaShader *s = &w->set->shaders[j->shader];
