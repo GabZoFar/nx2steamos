@@ -11,6 +11,7 @@
 // before it, the minimum follows the frame rate setting (Video > Frame rate: 60 or more, or no limit -> 1; 30 -> 2;
 // 30 too while a movie plays, as FPSLocker caps them); after it, the interval it chose paces the presents
 // (frame_timing_interval, runtime/nvn/objects.c present_pace), in place of the window's (which stays 2).
+#include <stdlib.h>
 #include <string.h>
 
 #include "../framepace.h"
@@ -50,6 +51,23 @@ static void timing_method(Cpu *c) {
     c->x[30] = lr;
     uint32_t iv = t[0x40 / 4];
     if (iv >= 1 && iv <= 4) g_interval = (int)iv;
+    // SAVAGEWIND_LOG_FRAME_TIMING=1: every 120 frames, the interval and the two times the game measured (this + 0x120,
+    // + 0x128, 19.2 MHz ticks; each + its margin in 60ths, timing + 8, + 0xc, must stay under one 60th for 60 fps)
+    static int log = -1;
+    static uint64_t n, sa, sb, wa, wb;
+    if (log < 0) log = getenv("SAVAGEWIND_LOG_FRAME_TIMING") != NULL;
+    if (log) {
+        const uint64_t *m = (const uint64_t *)(uintptr_t)(timing - g_timing_off + 0x120);
+        sa += m[0]; sb += m[1];
+        if (m[0] > wa) wa = m[0];
+        if (m[1] > wb) wb = m[1];
+        if (++n % 120 == 0) {
+            const float *mg = (const float *)(uintptr_t)(timing + 8);
+            LOG("[frame] interval %u (min %u): times %.1f / %.1f ms average, %.1f / %.1f longest, margins %.2f / %.2f\n", iv, t[0],
+                sa / 120 / 19200.0, sb / 120 / 19200.0, wa / 19200.0, wb / 19200.0, mg[0], mg[1]);
+            sa = sb = wa = wb = 0;
+        }
+    }
 }
 
 void frame_timing_boot(void) {

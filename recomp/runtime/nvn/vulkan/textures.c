@@ -770,7 +770,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b, bool written) {
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("SAVAGEWIND_TEX_FULLHASH") ? 1 : 0;
-    bool full = b->dynamic || !b->uploaded || always_full;
+    // (a texture too big to hash whole every frame is never dynamic: its chunks are checked a few at a time instead;
+    // Tears of the Kingdom fills some progressively, and hashing them whole every frame took a sixth of the frame's
+    // translation)
+    bool big = total > (4u << 20);
+    bool full = (b->dynamic && !big) || !b->uploaded || always_full;
     if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
     if (!full && !written && b->chunk_hash) {  // (a big texture: its chunks, a few each time)
         chunks_check(t, b, total);
@@ -786,7 +790,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, bool written) {
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash) return;
-    if (b->uploaded && h != b->data_hash && !written) b->dynamic = true;
+    if (b->uploaded && h != b->data_hash && !written && !big) b->dynamic = true;
     b->data_hash = h;
     b->uploaded = true;
     {   // (debugging) SAVAGEWIND_DUMP_RAW=<w>x<h>x<nvn format hex>: the guest storage of such textures as uploaded
@@ -808,7 +812,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, bool written) {
         }
     }
     upload_levels(t, b, ~0u);
-    if (total > (4u << 20) && !b->dynamic) chunks_reset(t, b, total);
+    if (big) chunks_reset(t, b, total);
 }
 
 // Guest texels for a scaled image (the CPU filled a render target: the title screen's save pictures): they go into a
