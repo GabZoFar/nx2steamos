@@ -19,6 +19,10 @@
 // a few frames now and then and back (a judder). So 60 is allowed only after FAST_FRAMES frames in a row under
 // FAST_TICKS, and the minimum goes back to 2 at the first frame over SLOW_TICKS: a steady 30 there, 60 where the game
 // keeps up with it.
+//
+// (benchmarks) SAVAGEWIND_FORCE_60=1: the minimum and the maximum at 1 whatever the frames take, so the frame rate
+// reached is what the game code and the runtime sustain (up to the display's 60); where they cannot keep 60 the
+// game's time runs slow.
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,7 +57,10 @@ static void timing_method(Cpu *c) {
     uint32_t min = fps == 0 || fps >= 60 ? 1 : fps >= 30 ? 2 : 3;
     if (__atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && min < 2) min = 2;
     if (min < 2 && g_fast < FAST_FRAMES) min = 2;  // (60 only once the game has kept well under a 60th for a while)
+    static int force = -1;
+    if (force < 0) force = getenv("SAVAGEWIND_FORCE_60") != NULL;
     uint32_t *t = (uint32_t *)(uintptr_t)timing;
+    if (force) min = 1, t[1] = 1;
     // the minimum, and the lower interval its hysteresis steps down to (+0x44, set from the minimum when the game
     // starts: left at 2, the interval never went below it); the game's maximum stays above them
     if (t[1] >= min) {

@@ -200,6 +200,7 @@ static void boot(const char *root) {
     uint64_t init_main = hle_register("<rtld_init_main>", rtld_init_main);
     uint64_t fini_main = has_fini ? hle_register("<rtld_fini_main>", rtld_fini_main) : 0;
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
+    LOG("main thread: handle %x\n", t->handle);  // (its host thread is "h<handle> p<prio>": nx2steamos's deck_bench.py)
     kernel_run_main(t, t->handle, 0, init_sdk, init_main, fini_main);
 }
 
