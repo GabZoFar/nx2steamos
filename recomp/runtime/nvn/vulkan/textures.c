@@ -474,6 +474,7 @@ static void free_backend(TexBackend *b) {
     images_remove(b);
     destroy_image(b);
     free(b->pending_rgba);
+    free(b->chunk_hash);
     free(b);
 }
 
@@ -678,6 +679,7 @@ static void upload_pending(TexBackend *b) {
 
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
 static void upload_levels(NvnTexture *t, TexBackend *b, uint32_t level_mask);
+static void upload_layers(NvnTexture *t, TexBackend *b, uint32_t level_mask, uint32_t first, uint32_t count);
 
 // Bytes of guest storage the texels occupy: rows at the stride for pitch textures, else the block-linear size.
 static uint64_t storage_size(const NvnTexture *t) {
@@ -690,6 +692,55 @@ static uint64_t storage_size(const NvnTexture *t) {
 static bool storage_readable(NvnTexture *t, uint64_t total) {
     if (t->addr < GUEST_LO && t->pool && t->pool->storage) t->addr = t->pool->storage + t->pool_offset;
     return t->addr >= GUEST_LO && t->addr + total <= GUEST_HI;
+}
+
+// Textures bigger than a frame's hashing budget are never hashed whole after their upload, and the sampled hash
+// misses most writes to them: Tears of the Kingdom creates its terrain's 121-layer ASTC arrays (42 MB) and its
+// 5120x5120 roughness atlas on zeroed memory and fills them from the CPU after their first use, with no NVN flush
+// (nxnative's finding, docs/agents/04-graphics.md); they stayed zero (magenta terrain, unlit stone). Such a texture
+// keeps a hash per chunk (a layer of an array, else 1 MB); each check rehashes the next chunks within the budget, and
+// a changed chunk goes up again alone (its layer), or the texture whole when it is not an array.
+static void chunks_reset(NvnTexture *t, TexBackend *b, uint64_t total) {
+    uint32_t layers = t->layout.layers ? t->layout.layers : 1;
+    bool linear = nvn_texture_flags_pitch(t->flags);
+    uint64_t cs = layers > 1 && !linear ? tegra_layer_size(&t->layout) : 1ull << 20;
+    uint32_t n = (uint32_t)((total + cs - 1) / cs);
+    if (b->nchunks != n || !b->chunk_hash) { free(b->chunk_hash); b->chunk_hash = calloc(n, sizeof *b->chunk_hash); b->nchunks = n; }
+    b->chunk_size = cs;
+    b->chunk_next = 0;
+    const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t off = (uint64_t)i * cs, len = total - off < cs ? total - off : cs;
+        b->chunk_hash[i] = hash_full(mem + off, len);
+    }
+}
+
+// Rehashes chunks from where the last check stopped, within the frame's budget; uploads what changed. true: something did.
+static bool chunks_check(NvnTexture *t, TexBackend *b, uint64_t total) {
+    if (!b->chunk_hash || !b->nchunks) return false;
+    const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
+    uint32_t layers = t->layout.layers ? t->layout.layers : 1;
+    bool per_layer = layers > 1 && b->nchunks == layers;
+    bool changed = false, whole = false;
+    for (uint32_t k = 0; k < b->nchunks && full_hash_budget >= b->chunk_size; k++) {
+        uint32_t i = b->chunk_next;
+        b->chunk_next = (i + 1) % b->nchunks;
+        uint64_t off = (uint64_t)i * b->chunk_size, len = total - off < b->chunk_size ? total - off : b->chunk_size;
+        full_hash_budget -= len;
+        uint64_t h = hash_full(mem + off, len);
+        if (h == b->chunk_hash[i]) continue;
+        b->chunk_hash[i] = h;
+        changed = true;
+        if (per_layer) upload_layers(t, b, ~0u, i, 1);
+        else whole = true;
+    }
+    if (whole) upload_levels(t, b, ~0u);
+    if (changed) b->sample_hash = fnv_sample(mem, total);
+    static int nlog;
+    if (changed && nlog++ < 6)
+        LOG("[vk] texture #%llu (%ux%u, %u layers, fmt %#x) written by the CPU after its upload: uploaded again\n",
+            (unsigned long long)t->debug_id, t->width, t->height, layers, t->format);
+    return changed;
 }
 
 // written: nvnTextureWriteTexels changed the texels (checked now, and that change does not make the texture dynamic)
@@ -721,6 +772,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b, bool written) {
     if (always_full < 0) always_full = getenv("SAVAGEWIND_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
+    if (!full && !written && b->chunk_hash) {  // (a big texture: its chunks, a few each time)
+        chunks_check(t, b, total);
+        return;
+    }
     if (!full) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
@@ -753,6 +808,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, bool written) {
         }
     }
     upload_levels(t, b, ~0u);
+    if (total > (4u << 20) && !b->dynamic) chunks_reset(t, b, total);
 }
 
 // Guest texels for a scaled image (the CPU filled a render target: the title screen's save pictures): they go into a
@@ -781,7 +837,10 @@ static void upload_scaled(VkCommandBuffer cb, TexBackend *b, VkSpan s, VkBufferI
 }
 
 // Guest memory -> image for the levels in level_mask (bit per level), every layer or slice.
-static void upload_levels(NvnTexture *t, TexBackend *b, uint32_t level_mask) {
+static void upload_levels(NvnTexture *t, TexBackend *b, uint32_t level_mask) { upload_layers(t, b, level_mask, 0, ~0u); }
+
+// The same for the layers [first, first + count) of an array (all of them otherwise).
+static void upload_layers(NvnTexture *t, TexBackend *b, uint32_t level_mask, uint32_t first, uint32_t count) {
     const FormatInfo *fi = t->layout.fmt;
     VkFmt mf = fmt_of(t->format);
     if (!t->addr || t->target == 10 || !fi || !fi->bpb || !storage_readable(t, storage_size(t))) return;
@@ -792,7 +851,8 @@ static void upload_levels(NvnTexture *t, TexBackend *b, uint32_t level_mask) {
     bool linear = nvn_texture_flags_pitch(t->flags);
     uint64_t layer_size = linear ? t->stride * (t->layout.height ? t->layout.height : 1) : tegra_layer_size(&t->layout);
     uint32_t levels = t->layout.levels < b->levels ? t->layout.levels : b->levels;
-    for (uint32_t layer = 0; layer < layers; layer++) {
+    uint32_t last = count > layers || first + count > layers ? layers : first + count;
+    for (uint32_t layer = first < layers ? first : layers; layer < last; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
             if (!((level_mask >> lv) & 1)) continue;
             LevelLayout l = tegra_level(&t->layout, lv);

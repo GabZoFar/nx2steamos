@@ -123,6 +123,36 @@ static void copy_surface(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t
     }
 }
 
+// A rectangle of one 2D slice (x0, y0, w, h in blocks, of a level wb x hb blocks) between block-linear storage and
+// tightly packed linear rows (w * bpb bytes each). Runs stop at 16-byte boundaries, where the layouts part.
+static void copy_region(uint8_t *bl, uint8_t *lin, uint32_t wb, uint32_t hb, uint32_t x0, uint32_t y0, uint32_t w,
+                        uint32_t h, uint32_t bpb, uint32_t bh_log2, bool to_linear) {
+    uint32_t width_gobs = (wb * bpb + 63) / 64;
+    uint64_t blocks_rows = (hb + (8u << bh_log2) - 1) / (8u << bh_log2);
+    uint32_t xs = x0 * bpb, xe = (x0 + w) * bpb, row = w * bpb;
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t *l = lin + (uint64_t)y * row;
+        for (uint32_t x = xs; x < xe;) {
+            uint32_t n = 16 - (x & 15);
+            if (n > xe - x) n = xe - x;
+            uint64_t o = gob_offset(x, y0 + y, 0, width_gobs, bh_log2, 0, blocks_rows);
+            if (to_linear) memcpy(l + (x - xs), bl + o, n);
+            else memcpy(bl + o, l + (x - xs), n);
+            x += n;
+        }
+    }
+}
+
+void tegra_deswizzle_region(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t x0, uint32_t y0,
+                            uint32_t w, uint32_t h, uint32_t bpb, uint32_t bh_log2) {
+    copy_region((uint8_t *)src, dst, wb, hb, x0, y0, w, h, bpb, bh_log2, true);
+}
+
+void tegra_swizzle_region(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t x0, uint32_t y0,
+                          uint32_t w, uint32_t h, uint32_t bpb, uint32_t bh_log2) {
+    copy_region(dst, (uint8_t *)src, wb, hb, x0, y0, w, h, bpb, bh_log2, false);
+}
+
 void tegra_deswizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t d, uint32_t bpb,
                      uint32_t bh_log2, uint32_t bd_log2) {
     copy_surface(src, dst, wb, hb, d, bpb, bh_log2, bd_log2, true);

@@ -794,14 +794,33 @@ NVN(nvnTextureWriteTexels) {
     uint32_t nz = array1d ? (uint32_t)(r[4] > 0 ? r[4] : 1) : (uint32_t)(r[5] > 0 ? r[5] : 1);
     if (!is3d && v && (v->setmask & 2)) z0 += v->min_layer;
     uint32_t nslices = is3d ? l.d : (t->layout.layers ? t->layout.layers : 1);
-    if (r[0] || y0 || (uint32_t)r[3] != l.w || h != l.h || (is3d && (z0 || nz != l.d)) || z0 + nz > nslices) {
+    uint32_t bw = t->layout.fmt->bw ? t->layout.fmt->bw : 1, bh = t->layout.fmt->bh ? t->layout.fmt->bh : 1;
+    uint32_t xb = (uint32_t)r[0] / bw, yb = y0 / bh, wb = ((uint32_t)r[3] + bw - 1) / bw, hb = (h + bh - 1) / bh;
+    bool whole = !r[0] && !y0 && (uint32_t)r[3] == l.w && h == l.h;
+    if (r[0] < 0 || xb + wb > l.wb || yb + hb > l.hb || (is3d && !(whole && !z0 && nz == l.d)) || z0 + nz > nslices) {
         static int n;
-        if (n++ < 8) LOG("[nvn] partial WriteTexels not implemented (#%llu %ux%u level %u, region %d,%d,%d %dx%dx%d)\n",
+        if (n++ < 8) LOG("[RED] [nvn] WriteTexels region not handled (#%llu %ux%u level %u, region %d,%d,%d %dx%dx%d)\n",
                          (unsigned long long)t->debug_id, t->width, t->height, level, r[0], r[1], r[2], r[3], r[4], r[5]);
         return;
     }
     uint32_t bpb = t->layout.fmt->bpb;
     uint8_t *base = (uint8_t *)(uintptr_t)t->addr;
+    if (!whole) {  // a rectangle of a level (Tears of the Kingdom fills its 5120x5120 roughness atlas in 1024x64 strips)
+        uint64_t row = (uint64_t)wb * bpb;
+        if (nvn_texture_flags_pitch(t->flags)) {
+            uint64_t stride = t->stride ? t->stride : (uint64_t)l.wb * bpb;
+            for (uint32_t y = 0; y < hb; y++) memcpy(base + (yb + y) * stride + (uint64_t)xb * bpb, (const uint8_t *)AP(3) + y * row, row);
+        } else {
+            uint64_t layer_size = tegra_layer_size(&t->layout);
+            for (uint32_t i = 0; i < nz; i++)
+                tegra_swizzle_region((const uint8_t *)AP(3) + (uint64_t)i * row * hb, base + (uint64_t)(z0 + i) * layer_size + l.offset,
+                                     l.wb, l.hb, xb, yb, wb, hb, bpb, l.block_height_log2);
+        }
+        kernel_watch_write("WriteTexels", t->addr, tegra_total_size(&t->layout));
+        __atomic_fetch_or(&t->cpu_levels, 1u << level, __ATOMIC_RELEASE);
+        backend_pool_written(t->addr, tegra_total_size(&t->layout));
+        return;
+    }
     if (nvn_texture_flags_pitch(t->flags)) {  // pitch storage: rows at the stride (one level, one layer)
         uint64_t row = (uint64_t)l.wb * bpb, stride = t->stride ? t->stride : row;
         kernel_watch_write("WriteTexels", t->addr, stride * l.hb);
@@ -822,7 +841,58 @@ NVN(nvnTextureWriteTexels) {
     backend_pool_written(t->addr, tegra_total_size(&t->layout));
 }
 NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
-NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
+NVN(nvnTextureReadTexels) {
+    // (texture, view, region, data): the region's texels of one level (the view's base level), tightly packed, read
+    // from the texture's storage in guest memory, where the CPU's writes are. Tears of the Kingdom fills its 1024x1024
+    // BC4 material textures on the CPU, reads them back this way on its own threads and copies the blocks into the
+    // roughness atlas its lit surfaces read: unread, the atlas stayed zero and no point light (the torch) lit anything
+    // (nxnative's finding, docs/agents/04-graphics.md). Textures the GPU drew into are not read back here.
+    NvnTexture *t = HOST(NvnTexture, A(0));
+    const NvnTextureView *v = A(1) ? (const NvnTextureView *)AP(1) : NULL;
+    const int32_t *r = AP(2);  // xoffset, yoffset, zoffset, width, height, depth
+    uint8_t *out = AP(3);
+    if (!t || !r || !out || !t->addr || !t->layout.fmt || !t->layout.fmt->bpb) return;
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    if (level >= t->layout.levels) return;
+    LevelLayout l = tegra_level(&t->layout, level);
+    const FormatInfo *fi = t->layout.fmt;
+    uint32_t bpb = fi->bpb, bw = fi->bw ? fi->bw : 1, bh = fi->bh ? fi->bh : 1;
+    bool is3d = t->target == 2, array1d = t->target == 3;
+    uint32_t y0 = array1d ? 0 : (uint32_t)r[1], h = array1d ? 1 : (uint32_t)r[4];
+    uint32_t z0 = array1d ? (uint32_t)r[1] : (uint32_t)r[2];
+    uint32_t nz = array1d ? (uint32_t)(r[4] > 0 ? r[4] : 1) : (uint32_t)(r[5] > 0 ? r[5] : 1);
+    if (!is3d && v && (v->setmask & 2)) z0 += v->min_layer;
+    uint32_t nslices = is3d ? l.d : (t->layout.layers ? t->layout.layers : 1);
+    uint32_t xb = (uint32_t)r[0] / bw, yb = y0 / bh, wb = ((uint32_t)r[3] + bw - 1) / bw, hb = (h + bh - 1) / bh;
+    if (r[0] < 0 || xb + wb > l.wb || yb + hb > l.hb || z0 + nz > nslices) {
+        static int n;
+        if (n++ < 8) LOG("[RED] [nvn] ReadTexels outside the texture (#%llu %ux%u level %u, region %d,%d,%d %dx%dx%d)\n",
+                         (unsigned long long)t->debug_id, t->width, t->height, level, r[0], r[1], r[2], r[3], r[4], r[5]);
+        return;
+    }
+    const uint8_t *base = (const uint8_t *)(uintptr_t)t->addr;
+    uint64_t row = (uint64_t)wb * bpb, lrow = (uint64_t)l.wb * bpb;
+    if (nvn_texture_flags_pitch(t->flags)) {  // pitch storage: rows at the stride (one level, one layer)
+        uint64_t stride = t->stride ? t->stride : lrow;
+        for (uint32_t y = 0; y < hb; y++) memcpy(out + y * row, base + (yb + y) * stride + (uint64_t)xb * bpb, row);
+        return;
+    }
+    if (!is3d) {
+        uint64_t layer_size = tegra_layer_size(&t->layout);
+        for (uint32_t i = 0; i < nz; i++)
+            tegra_deswizzle_region(base + (uint64_t)(z0 + i) * layer_size + l.offset, out + (uint64_t)i * row * hb, l.wb, l.hb,
+                                   xb, yb, wb, hb, bpb, l.block_height_log2);
+        return;
+    }
+    uint64_t slice = lrow * l.hb;
+    uint8_t *lin = malloc(slice * l.d);
+    if (!lin) return;
+    tegra_deswizzle(base + l.offset, lin, l.wb, l.hb, l.d, bpb, l.block_height_log2, l.block_depth_log2);
+    for (uint32_t i = 0; i < nz; i++)
+        for (uint32_t y = 0; y < hb; y++)
+            memcpy(out + ((uint64_t)i * hb + y) * row, lin + (uint64_t)(z0 + i) * slice + (uint64_t)(yb + y) * lrow + (uint64_t)xb * bpb, row);
+    free(lin);
+}
 NVN(nvnTextureReadTexelsStrided) { (void)c; }
 
 // ================================================================== samplers

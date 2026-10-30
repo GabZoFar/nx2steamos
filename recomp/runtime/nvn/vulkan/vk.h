@@ -98,6 +98,9 @@ typedef struct TexBackend {
     bool feedback_seen;      // a draw sampled it while writing it: its passes begin with the feedback loop enabled
     bool in_feedback_layout; // in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL now (g_vk.feedback_layout: a pass that loops, exec.c)
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
+    uint64_t *chunk_hash;        // a texture too big to hash whole each time: a hash per chunk (textures.c chunk_check)
+    uint64_t chunk_size;
+    uint32_t nchunks, chunk_next;
     bool scalable, presented;
     uint8_t rs_group;            // RS_*: which output scale its allocation follows (textures.c)
     uint32_t guest_w;            // (RS_SHADOW: the guest width its scale is worked out from)

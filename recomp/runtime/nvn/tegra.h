@@ -40,3 +40,8 @@ void tegra_deswizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb,
                      uint32_t block_height_log2, uint32_t block_depth_log2);
 void tegra_swizzle(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t d, uint32_t bpb,
                    uint32_t block_height_log2, uint32_t block_depth_log2);
+// The same for a rectangle (x0, y0, w, h in blocks) of one 2D slice of a level wb x hb blocks; linear rows are w * bpb.
+void tegra_deswizzle_region(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t x0, uint32_t y0,
+                            uint32_t w, uint32_t h, uint32_t bpb, uint32_t block_height_log2);
+void tegra_swizzle_region(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t x0, uint32_t y0,
+                          uint32_t w, uint32_t h, uint32_t bpb, uint32_t block_height_log2);
