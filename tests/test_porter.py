@@ -66,6 +66,17 @@ class Vdf(unittest.TestCase):
         t = steam.desktop_entry(steam.Shortcut('Game: Edition', '/g h/nx2steamos-run', '/g h', '/g h/art/icon.png'))
         self.assertIn('Exec="/g h/nx2steamos-run"\n', t); self.assertIn('Name=Game: Edition\n', t); self.assertTrue(t.startswith('[Desktop Entry]\n'))
 
+    def test_steam_session(self):   # a restart brings Steam back in the session it ran in, with its own arguments
+        cmd = b'/home/deck/.local/share/Steam/ubuntu12_32/steam\0-srt-logger-opened\0-steamdeck\0-gamepadui\0'
+        env = b'HOME=/home/deck\0DISPLAY=:0\0XDG_RUNTIME_DIR=/run/user/1000\0DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\0LD_LIBRARY_PATH=/x\0'
+        args, e = steam.session_from(cmd, env)
+        self.assertEqual(args, ['-steamdeck', '-gamepadui'])
+        self.assertEqual(e, {'DISPLAY': ':0', 'XDG_RUNTIME_DIR': '/run/user/1000', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus'})
+        argv, _ = steam.start_command((args, e), '/usr/bin/systemd-run')
+        self.assertEqual(argv[:4], ['/usr/bin/systemd-run', '--user', '--collect', '--quiet'])
+        self.assertIn('--setenv=DISPLAY=:0', argv); self.assertEqual(argv[-3:], ['steam', '-steamdeck', '-gamepadui'])
+        self.assertEqual(steam.start_command(None, None)[0], ['steam', '-silent'])
+
     def test_register_with_steam_closed(self):   # the file itself, a backup of the player's, the artwork under the computed id
         with tempfile.TemporaryDirectory() as d:
             home = Path(d); acct = home / '.local/share/Steam/userdata/12345/config'; acct.mkdir(parents=True)

@@ -277,6 +277,33 @@ def _steam_pids():
     return out
 
 
+# What the desktop or Game Mode session gives Steam, and Steam needs to come back on that screen and session bus; over
+# SSH none of it is set, and a Steam started from there (or a steam:// URL sent from there) never reached the session.
+SESSION_KEYS = ('DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_SESSION_TYPE',
+                'XDG_SESSION_CLASS', 'XDG_SESSION_ID', 'XDG_SESSION_DESKTOP', 'XDG_CURRENT_DESKTOP', 'XDG_SEAT', 'XDG_VTNR',
+                'DESKTOP_SESSION', 'KDE_FULL_SESSION', 'KDE_SESSION_VERSION', 'SteamDeck', 'SteamOS', 'SteamGamepadUI')
+BOOTSTRAP_ARGS = ('-srt-logger-opened',)   # (added by Steam's own launcher script: not ours to pass)
+
+
+def session_from(cmdline: bytes, environ: bytes) -> tuple[list, dict]:
+    """(arguments, session variables) of a running Steam from its /proc cmdline and environ (NUL-separated): what start_steam needs to start it again as
+    the session had (Game Mode's -gamepadui and the like included)"""
+    args = [a.decode(errors='replace') for a in cmdline.split(b'\0')[1:] if a]
+    env = {}
+    for kv in environ.split(b'\0'):
+        k, eq, v = kv.decode(errors='replace').partition('=')
+        if eq and k in SESSION_KEYS: env[k] = v
+    return [a for a in args if a not in BOOTSTRAP_ARGS], env
+
+
+def steam_session() -> tuple[list, dict]:
+    """The running Steam's session (session_from), from its client process (the oldest one): ([], {}) when there is none or it cannot be read"""
+    for pid in sorted(_steam_pids()):
+        try: return session_from(Path(f'/proc/{pid}/cmdline').read_bytes(), Path(f'/proc/{pid}/environ').read_bytes())
+        except OSError: continue
+    return [], {}
+
+
 def stop_steam(timeout=40) -> None:
     subprocess.run(['steam', '-shutdown'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     end = time.time() + timeout
@@ -286,8 +313,19 @@ def stop_steam(timeout=40) -> None:
     raise SteamError(f'Steam did not quit within {timeout} s')
 
 
-def start_steam() -> None:
-    subprocess.Popen(['steam', '-silent'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+def start_command(session: tuple[list, dict] | None, systemd_run: str | None) -> tuple[list, dict]:
+    """(argv, environment) that start Steam again in the session it ran in (steam_session, taken before stop_steam), else -silent. With systemd-run, as a
+    unit of the user's service manager: started from an SSH login, a plain child went with that login when it closed (and Steam never came back)"""
+    args, env = session if session and (session[0] or session[1]) else (['-silent'], {})
+    if systemd_run and env.get('XDG_RUNTIME_DIR'):
+        sets = [f'--setenv={k}={v}' for k, v in sorted(env.items())]
+        return [systemd_run, '--user', '--collect', '--quiet', *sets, 'steam', *args], dict(os.environ, **env)
+    return ['steam', *args], dict(os.environ, **env)
+
+
+def start_steam(session: tuple[list, dict] | None = None) -> None:
+    argv, env = start_command(session, shutil.which('systemd-run'))
+    subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def place_art(account: Path, appid: int, art: dict) -> list:
@@ -307,6 +345,7 @@ def register(sc: Shortcut, art: dict | None = None, account: str = '', restart: 
     acct = next((a for a in accts if a.name == account), None) if account else (accts[0] if accts else None)
     if not acct: raise SteamError(f'no Steam account {account or "logged in"} under {root / "userdata"}')
     path = shortcuts_path(acct); restarted = False
+    session = steam_session() if steam_running() else ([], {})
     if steam_running() and restart:
         log('stopping Steam to write its shortcuts'); stop_steam(); restarted = True
     if not steam_running():   # the file itself, under the id this tool computes (Steam keeps a valid id it finds there)
@@ -321,14 +360,15 @@ def register(sc: Shortcut, art: dict | None = None, account: str = '', restart: 
         if entry is None:
             desk = Path(sc.start_dir) / 'nx2steamos.desktop'; desk.write_text(desktop_entry(sc), encoding='utf-8')
             Path('/tmp/addnonsteamgamefile').touch()   # the marker Valve's steamos-add-to-steam leaves: add without asking
-            subprocess.run(['steam', 'steam://addnonsteamgame/' + urllib.parse.quote(str(desk))], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            subprocess.run(['steam', 'steam://addnonsteamgame/' + urllib.parse.quote(str(desk))], env=dict(os.environ, **session[1]),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
             end = time.time() + wait
             while time.time() < end and appid is None: time.sleep(0.5); entry, appid = _ours_in(path, sc)
             if appid is None: raise SteamError('Steam was asked to add the game but has not written it to its shortcuts yet: check the library, or run again with --restart-steam')
             how = 'added by Steam (steam://addnonsteamgame)'
         else: how = 'already in the library'
     placed = place_art(acct, appid, art or {})
-    if restarted: log('starting Steam again'); start_steam()
+    if restarted: log('starting Steam again'); start_steam(session)
     return {'appid': appid, 'rungameid': rungameid(appid), 'account': acct.name, 'how': how, 'art': placed, 'restarted': restarted}
 
 
