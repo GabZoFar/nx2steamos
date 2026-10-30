@@ -222,6 +222,7 @@ static void qop_run(const QOp *o) {
 
 static void *queue_thread(void *arg) {
     (void)arg;
+    plat_thread_name("nvn queue");
     kernel_sample_host_thread();
     pthread_mutex_lock(&g_q_lock);
     for (;;) {

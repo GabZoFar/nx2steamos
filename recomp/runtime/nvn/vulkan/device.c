@@ -951,6 +951,7 @@ static _Atomic int pres_stale;   // that present said the swapchain is out of da
 
 static void *present_thread(void *arg) {
     (void)arg;
+    plat_thread_name("vk present");
     pthread_mutex_lock(&pres_m);
     for (;;) {
         while (!pres_busy) pthread_cond_wait(&pres_cv, &pres_m);

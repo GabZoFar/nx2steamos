@@ -42,6 +42,10 @@ struct KThread {
     int core_held;
     uint64_t core_ticket;
     bool off_cores;  // runs beside the cores, never holding one (kernel_thread_off_cores)
+    // (SAVAGEWIND_PROF_THREADS, runtime/kernel.c) ns it waited for its core, was blocked in a wait, slept, did host work
+    // beside the cores and took to run again once woken, and its blocking waits, added by the thread itself; the last
+    // report's readings (CPU time first); when a waker woke it (g_klock)
+    uint64_t prof_ns[6], prof_seen[7], prof_woken;
 };
 
 typedef struct KSharedMem {

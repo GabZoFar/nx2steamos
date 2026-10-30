@@ -66,6 +66,8 @@ void plat_thread_realtime(uint64_t period_ns) {
                       THREAD_TIME_CONSTRAINT_POLICY_COUNT);
 }
 
+void plat_thread_name(const char *name) { pthread_setname_np(name); }
+
 bool plat_exe_path(char *buf, size_t size) {
     uint32_t len = (uint32_t)size;
     return _NSGetExecutablePath(buf, &len) == 0;

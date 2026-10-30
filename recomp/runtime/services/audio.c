@@ -650,6 +650,7 @@ static int output_target(SDL_AudioStream *st, uint32_t rate, uint32_t n) {
 
 static void *renderer_tick(void *arg) {
     Renderer *r = arg;
+    plat_thread_name("audio renderer");
     float out[2 * 4096];
     uint32_t N = r->sample_count > 4096 ? 4096 : r->sample_count;
     int frame_bytes = (int)(N * 2 * sizeof(float));
@@ -1448,6 +1449,7 @@ RT_ON_RESET(audio_reset) {
 // stream plays the role of the hardware queue. Without a device, buffers are released in real time.
 static void *audout_thread(void *arg) {
     AudioOut *a = arg;
+    plat_thread_name("audio out");
     uint32_t ch = a->channels ? a->channels : 2;
     int target = 0;
     if (a->stream) {

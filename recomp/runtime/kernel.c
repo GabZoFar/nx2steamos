@@ -65,7 +65,23 @@ static void handle_close(uint32_t h) {
 // Threads blocked in WaitSynchronization; object signals wake only these (caller holds g_klock).
 static KThread *g_syncwaiters;
 
-static void wake(KThread *t) { pthread_cond_signal(&t->cond); }
+// (profiling) SAVAGEWIND_PROF_THREADS=<seconds> (2 when not a number): every that many seconds, a "[threads]" line per
+// guest thread that ran or waited meanwhile, in ms per frame presented: its CPU time (Linux), the time it waited for
+// its core token, was blocked in a wait (WaitSynchronization, mutexes, condition variables, addresses), slept, and did
+// host work beside the cores (the GPU backend's submits, presents and waits). Where a frame's time goes when no host
+// core is busy: a thread's CPU time and its waits add up to the frame, less what it spent runnable but not running.
+// Then its blocking waits a frame and how long one took to run again once woken, on average (the handoffs' cost).
+enum { PROF_CORE, PROF_SYNC, PROF_SLEEP, PROF_HOST, PROF_WAKE, PROF_WAITS };
+static int g_prof_threads;  // the report's period in seconds; 0: off (kernel_init)
+static inline uint64_t prof_t0(void) { return g_prof_threads ? plat_now_ns() : 0; }
+static inline void prof_add(KThread *t, int what, uint64_t t0) {
+    if (t0 && t) __atomic_fetch_add(&t->prof_ns[what], plat_now_ns() - t0, __ATOMIC_RELAXED);
+}
+
+static void wake(KThread *t) {
+    if (g_prof_threads) t->prof_woken = plat_now_ns();
+    pthread_cond_signal(&t->cond);
+}
 
 void kernel_signal(KObject *o) {
     // caller holds g_klock
@@ -149,6 +165,7 @@ static void core_acquire(KThread *t) {
     if (one_core < 0) one_core = getenv("SAVAGEWIND_ONE_CORE") != NULL;
     int idx = one_core ? 0 : t->core & 3;
     Core *k = &g_cores[idx];
+    uint64_t p0 = prof_t0();
     pthread_mutex_lock(&k->m);
     t->core_ticket = k->next_ticket++;
     if (k->nwaiting < 64) k->waiting[k->nwaiting++] = t;
@@ -160,6 +177,7 @@ static void core_acquire(KThread *t) {
     if (!k->owner) k->owner = t;  // (during a reboot the core may stay with another thread: run anyway)
     t->core_held = k->owner == t ? idx : -1;
     pthread_mutex_unlock(&k->m);
+    prof_add(t, PROF_CORE, p0);
 }
 
 static void core_release(KThread *t) {
@@ -187,8 +205,10 @@ void kernel_thread_off_cores(void) {
 void kernel_sleep_until_ns(uint64_t t) {
     KThread *me = t_cur;
     core_release(me);
+    uint64_t p0 = prof_t0();
     for (uint64_t now; !g_rt_unwind && (now = plat_now_ns()) < t;)
         plat_sleep_until_ns(t - now < 50000000 ? t : now + 50000000);
+    prof_add(me, PROF_SLEEP, p0);
     core_acquire(me);
 }
 
@@ -197,11 +217,12 @@ void kernel_sleep_until_ns(uint64_t t) {
 // it is host code on the submitting thread, ~10 ms a frame in the open world plus shader compiles: holding the core,
 // it kept the game's other threads of that core waiting. It reads guest memory the GPU would read anyway.
 static __thread int host_work_depth;
+static __thread uint64_t host_work_t0;
 void kernel_host_work_begin(void) {
-    if (host_work_depth++ == 0) core_release(t_cur);
+    if (host_work_depth++ == 0) core_release(t_cur), host_work_t0 = prof_t0();
 }
 void kernel_host_work_end(void) {
-    if (--host_work_depth == 0) core_acquire(t_cur);
+    if (--host_work_depth == 0) prof_add(t_cur, PROF_HOST, host_work_t0), core_acquire(t_cur);
 }
 
 // At a syscall: give the core to a better thread waiting for it, if there is one.
@@ -254,11 +275,17 @@ static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     bool held = t && t->core_held >= 0;
     if (held) core_release(t);  // (lock order: g_klock, then a core's m; core_acquire never runs under g_klock)
     bool r;
+    uint64_t p0 = prof_t0();
     if (timeout_ns < 0) {
         pthread_cond_wait(cv, &g_klock);
         r = true;
     } else {
         r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
+    }
+    prof_add(t, PROF_SYNC, p0);
+    if (p0 && t) {
+        t->prof_ns[PROF_WAITS]++;
+        if (t->prof_woken) t->prof_ns[PROF_WAKE] += plat_now_ns() - t->prof_woken, t->prof_woken = 0;
     }
     if (held) {
         pthread_mutex_unlock(&g_klock);
@@ -445,6 +472,9 @@ void rt_unwind_point(void) {
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
+    char name[16];  // (perf, top) the guest thread's handle and priority, as CreateThread logs them
+    snprintf(name, sizeof name, "h%x p%d", t->handle, t->prio);
+    plat_thread_name(name);
     crash_handler_install();
     rt_set_fpcr(0);
     core_acquire(t);
@@ -974,11 +1004,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         int64_t ns = (int64_t)x[0];
         if (ns <= 0) { core_yield(t_cur); break; }
         core_release(t_cur);
+        uint64_t p0 = prof_t0();
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};
             nanosleep(&ts, NULL);
         }
+        prof_add(t_cur, PROF_SLEEP, p0);
         core_acquire(t_cur);
         break;
     }
@@ -1322,6 +1354,49 @@ static void *thread_dump_timer(void *arg) {
     return NULL;
 }
 
+static void *prof_threads_main(void *arg) {  // (SAVAGEWIND_PROF_THREADS)
+    (void)arg;
+    plat_thread_name("prof threads");
+    extern uint64_t renderer_present_count(void);
+    uint64_t f0 = renderer_present_count(), w0 = plat_now_ns();
+    static char lines[128][128];
+    for (;;) {
+        struct timespec ts = {g_prof_threads, 0};
+        nanosleep(&ts, NULL);
+        uint64_t f1 = renderer_present_count(), w1 = plat_now_ns();
+        double per = f1 > f0 ? 1e6 * (double)(f1 - f0) : 1e6;  // (ns to ms per frame)
+        int n = 0;
+        pthread_mutex_lock(&g_klock);
+        for (KThread *t = g_threads; t; t = t->anext) {
+            if (!t->started || t->finished) continue;
+            uint64_t now[7] = {0}, d[7];
+#ifdef __linux__
+            clockid_t cid;
+            struct timespec c;
+            if (!pthread_getcpuclockid(t->host, &cid) && !clock_gettime(cid, &c)) now[0] = (uint64_t)c.tv_sec * 1000000000ull + (uint64_t)c.tv_nsec;
+#endif
+            bool any = false;
+            for (int i = 0; i < 7; i++) {
+                if (i) now[i] = __atomic_load_n(&t->prof_ns[i - 1], __ATOMIC_RELAXED);
+                d[i] = now[i] - t->prof_seen[i];
+                t->prof_seen[i] = now[i];
+                any |= i < 5 && d[i] > 1000000;
+            }
+            if (any && n < 128)
+                snprintf(lines[n++], sizeof lines[0], "[threads]   h%x p%d c%d%s: %6.2f %6.2f %6.2f %6.2f %6.2f | %6.1f waits, woken in %.1f us\n",
+                         t->handle, t->prio, t->core, t->off_cores ? "x" : "", d[0] / per, d[1] / per, d[2] / per, d[3] / per,
+                         d[4] / per, d[6] * 1e6 / per, d[6] ? d[5] / 1e3 / (double)d[6] : 0.0);
+        }
+        pthread_mutex_unlock(&g_klock);
+        LOG("[threads] %.1f s, %llu frames; ms a frame: cpu, waiting for its core, blocked, asleep, host work | blocking waits a "
+            "frame, the time one took to run again once woken\n", (w1 - w0) / 1e9,
+            (unsigned long long)(f1 - f0));
+        for (int i = 0; i < n; i++) LOG("%s", lines[i]);
+        f0 = f1, w0 = w1;
+    }
+    return NULL;
+}
+
 // (debug) SAVAGEWIND_WATCH=<addr>:<len> (hex, len up to 64): report when those guest bytes change, polled every
 // millisecond, and when an HLE copy (kernel_watch_write) writes over them. For memory corruption: a change with
 // no HLE report next to it came from guest code; SAVAGEWIND_TRACE_SVC around it shows what the guest was doing.
@@ -1408,6 +1483,14 @@ void kernel_init(void) {
         dump_started = true;
         pthread_t th;
         pthread_create(&th, NULL, thread_dump_timer, (void *)getenv("SAVAGEWIND_THREAD_DUMP_AT"));
+    }
+    static bool prof_started;
+    if (!prof_started && getenv("SAVAGEWIND_PROF_THREADS")) {
+        prof_started = true;
+        g_prof_threads = atoi(getenv("SAVAGEWIND_PROF_THREADS"));
+        if (g_prof_threads <= 0) g_prof_threads = 2;
+        pthread_t th;
+        pthread_create(&th, NULL, prof_threads_main, NULL);
     }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
