@@ -103,10 +103,13 @@ def emit(w, kind=None):
 
 # Where a thread's slots are (DM_TARGET). apple: Darwin's TSD, slot = tpidrro_el0 + key number * 8. android: tpidrro_el0 reads 0 for 64-bit Linux tasks and
 # bionic owns tpidr_el0, so each guest thread's slot block hangs off bionic's TLS_SLOT_APP (tpidr_el0[2], reserved for app use) and the key page holds offsets
-# into that block (the Android host's dm_tsd_*): one more load per slot access
-TARGET = os.environ.get('DM_TARGET', 'apple'); assert TARGET in ('apple', 'android'), f'DM_TARGET {TARGET}: apple or android'
+# into that block (the Android host's dm_tsd_*): one more load per slot access. linux (glibc: SteamOS): the same block, but glibc's static TLS starts at
+# tpidr_el0 + 16, so tpidr_el0[2] is the host's own TLS there; the block hangs off tpidr_el0[1] instead, the second word of glibc's TCB (tcbhead_t.private),
+# which glibc on aarch64 neither reads nor writes (nx2steamos probes/tlsprobe.c checks it on the device)
+TARGET = os.environ.get('DM_TARGET', 'apple'); assert TARGET in ('apple', 'android', 'linux'), f'DM_TARGET {TARGET}: apple, android or linux'
+TP_SLOT = {'android': 2, 'linux': 1}   # the tpidr_el0 word that holds the thread's slot block
 def emit_tp(t):
-    if TARGET == 'android': emit(MRS_TPIDR(t)); emit(LDRX(t, t, 2))
+    if TARGET in TP_SLOT: emit(MRS_TPIDR(t)); emit(LDRX(t, t, TP_SLOT[TARGET]))
     else: emit(MRS_TPIDRRO(t))
 
 def emit_key_addr(reg, kind):

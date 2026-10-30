@@ -451,7 +451,7 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 // reads them in both (in console mode in screen pixels, hle_touch.c DM_TOUCH_DOCKED)
 int touch_fill_n(void *out, int max, uint64_t now_ns);
 static int touch_on(void) {
-#ifdef __ANDROID__
+#ifdef __linux__   // Android and SteamOS: the touch screen counts in both modes, as the front ends send touches only where there is one
     return 1;
 #else
     return dm_opmode() == 0;

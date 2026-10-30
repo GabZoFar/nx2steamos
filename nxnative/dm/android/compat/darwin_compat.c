@@ -1,4 +1,4 @@
-// Android port: the Darwin / Mach calls the host makes, on Linux and bionic (headers in dm/android/compat/include).
+// Android port: the Darwin / Mach calls the host makes, on Linux and bionic (headers in dm/android/compat/include); the SteamOS host builds it on glibc too.
 #include <mach/mach.h>
 #include <mach-o/getsect.h>
 #include <pthread/qos.h>
@@ -24,6 +24,12 @@
 #include <unistd.h>
 
 // ---------------- ports ----------------
+#ifndef __ANDROID__
+// glibc before 2.42 has no pthread_gettid_np (bionic's). Every caller asks about the calling thread (hle_thread.c, hle_nvn.c: pthread_self()), whose id gettid gives;
+// another thread's has no glibc call, and -1 says so
+static pid_t dm_gettid_np(pthread_t t) { return pthread_equal(t, pthread_self()) ? gettid() : -1; }
+#define pthread_gettid_np dm_gettid_np
+#endif
 mach_port_t mach_task_self(void) { return getpid(); }
 mach_port_t mach_thread_self(void) { return gettid(); }
 kern_return_t mach_port_deallocate(task_t task, mach_port_t name) { (void)task; (void)name; return KERN_SUCCESS; }

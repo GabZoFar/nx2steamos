@@ -3,7 +3,13 @@
 //   presents to the game's period (hle_nvn.c acquire), and the window asks the display for a rate that period divides (dm_perf_window).
 // - ADPF (APerformanceHint, Android 13): the presenting thread reports how long each frame's work took against the frame period, so the
 //   CPU governor raises clocks before a frame runs late instead of after (the hint is ignored where the API is missing).
+#ifdef __ANDROID__
 #include <android/native_window.h>
+typedef ANativeWindow dm_window_t;
+#else   // Linux (SteamOS, nx2steamos): no ADPF (hint_init finds no libandroid.so) and no per-window rate; the adaptive rate and the replay pinning are the same
+typedef struct dm_window dm_window_t;
+int front_screen_max_fps(void);   // dm/steamos/front_sdl.c
+#endif
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -109,7 +115,7 @@ static int64_t g_work_start;
 // ---- adaptive frame rate: when the frames do not fit the period the game asks for, presentation steps to a longer one the display divides evenly
 // (60 → 40 → 30 fps; 40 asks the display for 120 Hz), and back when they fit the shorter one with room; a steady rate instead of alternating
 // one-vsync and two-vsync frames. DM_ADAPTIVE_FPS=0 keeps the game's own period.
-static const int64_t STEPS[] = {16666667, 25000000, 33333333};   // 60, 40, 30 fps
+static int64_t STEPS[] = {16666667, 25000000, 33333333};   // 60, 40, 30 fps (on Linux, 40 only on a display whose rate it divides: dm_present_period_adapt)
 static int g_step = 0, g_adapt = -1; static int64_t g_work_hist[64]; static int g_nwork;
 static int64_t g_last_change, g_last_up, g_up_hold = 2000000000; static int g_ok_frames; static uint64_t g_game_period;   // the period the game asks for, before the adaptive step
 static int64_t work_pct(int q) {   // the q-th percentile of the last 64 frames' work
@@ -120,7 +126,13 @@ static int64_t work_pct(int q) {   // the q-th percentile of the last 64 frames'
 }
 static int64_t work_p95(void) { return work_pct(95); }
 uint64_t dm_present_period_adapt(uint64_t period) {
-    if (g_adapt < 0) { const char *e = getenv("DM_ADAPTIVE_FPS"); g_adapt = !(e && !atoi(e)); }
+    if (g_adapt < 0) { const char *e = getenv("DM_ADAPTIVE_FPS"); g_adapt = !(e && !atoi(e));
+#ifndef __ANDROID__
+        // Android asks the display for 120 Hz at 40 fps (dm_perf_window); a SteamOS window cannot, and 40 fps on a 60 Hz panel alternates one and two vsyncs:
+        // there the step below 60 is 30
+        int hz = front_screen_max_fps(); if (hz <= 0 || hz % 40) { STEPS[1] = STEPS[2]; LOG("[perf] adaptive frame rate: 60 / 30 fps (the display runs at %d Hz)", hz); }
+#endif
+    }
     if (!g_adapt || !period) return period;
     g_game_period = period;
     int64_t want = STEPS[g_step];
@@ -213,9 +225,13 @@ void dm_perf_frame(double period) {
 }
 
 // The window's frame rate: the game's rate, so the display can pick a mode it divides (60 / 120 Hz rather than 144 Hz for a 60 fps game).
-void dm_perf_window(ANativeWindow *w, double fps) {
+void dm_perf_window(dm_window_t *w, double fps) {
     if (!w || fps <= 0) return;
+#ifdef __ANDROID__
     int r = ANativeWindow_setFrameRate(w, (float)fps, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
     LOG("[perf] window frame rate %.0f fps%s", fps, r ? " refused" : "");
+#else   // gamescope and Steam's frame limit choose the panel's rate on SteamOS
+    LOG("[perf] game frame rate %.0f fps (the display stays at %d Hz)", fps, front_screen_max_fps());
+#endif
 }
 

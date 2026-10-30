@@ -1,7 +1,8 @@
 // Android port, Vulkan backend: device, memory pools, submissions, completion (see gfx_vk.h).
 //   Memory pools: NVN gives the GPU the game's own memory (GPU address = CPU address). Each pool's pages are replaced by an AHardwareBuffer mapped at the same
 //   address (its dma-buf mmapped MAP_FIXED, contents copied over), and the same AHardwareBuffer is imported as a VkBuffer: the game's pointer is GPU memory,
-//   CPU-cached and coherent on Adreno (measured: probes/vkzc.c). A pool the allocator refuses keeps its anonymous pages and gets a GPU copy refreshed before
+//   CPU-cached and coherent on Adreno (measured: probes/vkzc.c). On Linux (SteamOS) the same pages are an exported dma-buf mapped MAP_FIXED, or a placed map
+//   (VK_EXT_map_memory_placed): dm/steamos/vk_platform.c. A pool the allocator refuses keeps its anonymous pages and gets a GPU copy refreshed before
 //   every submission (vk_pools_sync), correct but slow, reported once.
 //   Submissions: a ring of slots, each with a command pool (upload + main command buffers), descriptor pools, scratch memory and objects freed once the GPU has
 //   passed it. A submission signals a timeline semaphore with its fence; a completion thread waits for it and then applies what the CPU may see of its work
@@ -10,7 +11,9 @@
 #include "gfx_vk.h"
 #include "nvn_hmap.h"
 #include "nvn_dirty.h"
+#ifdef __ANDROID__
 #include <android/hardware_buffer.h>
+#endif
 #include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
@@ -52,18 +55,29 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vk_validation_msg(VkDebugUtilsMessageSever
 
 void vk_init(void) {
     static int done; if (done) return; done = 1;
-    void *lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) die("[vk] libvulkan.so: %s", dlerror());
+#ifdef __ANDROID__
+    static const char *const vklib = "libvulkan.so";
+#else
+    static const char *const vklib = "libvulkan.so.1";   // the Khronos loader's soname on desktop Linux (the Mesa drivers behind it)
+#endif
+    void *lib = dlopen(vklib, RTLD_NOW | RTLD_LOCAL);
+    if (!lib) die("[vk] %s: %s", vklib, dlerror());
     p_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
     vkCreateInstance = (PFN_vkCreateInstance)p_vkGetInstanceProcAddr(NULL, "vkCreateInstance");
-    const char *iext[] = {"VK_KHR_surface", "VK_KHR_android_surface", "VK_EXT_debug_utils"};
+#ifdef __ANDROID__
+    const char *iext[8] = {"VK_KHR_surface", "VK_KHR_android_surface"}; uint32_t niext = 2;
+#else
+    const char *iext[8]; uint32_t niext = 0;   // the window system's (SDL's list), none without a window
+    { uint32_t n = 0; const char *const *e = vkp_instance_exts(&n); for (uint32_t i = 0; i < n && niext < 7; i++) iext[niext++] = e[i]; }
+#endif
+    iext[niext] = "VK_EXT_debug_utils";
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "dmhost", 1, "nxnative", 1, VK_API_VERSION_1_3};
     // DM_VK_VALIDATE=1: Khronos's validation layer, which the APK carries only when built with it (mkapk.py --extra-so); its messages go to the log
     int validate = getenv("DM_VK_VALIDATE") && atoi(getenv("DM_VK_VALIDATE"));
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
-    VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app, validate ? 1u : 0u, layers, validate ? 3u : 2u, iext};
+    VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app, validate ? 1u : 0u, layers, validate ? niext + 1 : niext, iext};
     VkResult ir = vkCreateInstance(&ici, NULL, &V.inst);
-    if (ir && validate) { VKLOG("[RED] validation layer not available (%d): running without it", ir); validate = 0; ici.enabledLayerCount = 0; ici.enabledExtensionCount = 2; ir = vkCreateInstance(&ici, NULL, &V.inst); }
+    if (ir && validate) { VKLOG("[RED] validation layer not available (%d): running without it", ir); validate = 0; ici.enabledLayerCount = 0; ici.enabledExtensionCount = niext; ir = vkCreateInstance(&ici, NULL, &V.inst); }
     VKCHK(ir);
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT mk = (PFN_vkCreateDebugUtilsMessengerEXT)p_vkGetInstanceProcAddr(V.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -82,8 +96,11 @@ void vk_init(void) {
     if (V.qf == qn) die("[vk] no graphics + compute queue");
     uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, NULL);
     VkExtensionProperties *ex = calloc(ne, sizeof *ex); vkEnumerateDeviceExtensionProperties(V.pd, NULL, &ne, ex);
-    const char *want[] = {"VK_KHR_swapchain", "VK_ANDROID_external_memory_android_hardware_buffer", "VK_EXT_queue_family_foreign", "VK_EXT_custom_border_color",
-                          "VK_EXT_robustness2", "VK_EXT_depth_clip_control", "VK_EXT_provoking_vertex", "VK_EXT_index_type_uint8", "VK_EXT_transform_feedback",
+    const char *want[] = {"VK_KHR_swapchain",
+#ifdef __ANDROID__
+                          "VK_ANDROID_external_memory_android_hardware_buffer", "VK_EXT_queue_family_foreign",
+#endif
+                          "VK_EXT_custom_border_color", "VK_EXT_robustness2", "VK_EXT_depth_clip_control", "VK_EXT_provoking_vertex", "VK_EXT_index_type_uint8", "VK_EXT_transform_feedback",
                           "VK_GOOGLE_display_timing"};
     const char *on[64]; uint32_t non = 0;
     for (unsigned i = 0; i < sizeof want / sizeof *want; i++) if (has_ext(ex, ne, want[i])) on[non++] = want[i]; else VKLOG("device has no %s", want[i]);
@@ -162,6 +179,9 @@ void vk_init(void) {
     fxf.pNext = &fu8;
     VkBaseOutStructure *t = ff.pNext; while (t->pNext) t = t->pNext;   // the queried chain (core / promoted features), then the extensions'
     t->pNext = V.has_xfb ? (VkBaseOutStructure *)&fxf : (VkBaseOutStructure *)&fu8;
+#ifndef __ANDROID__
+    { VkBaseOutStructure *end = t; while (end->pNext) end = end->pNext; vkp_device_exts(ex, ne, on, &non, end); }   // the platform's own (external memory, placed maps)
+#endif
     VkPhysicalDeviceFeatures2 enf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, ff.pNext, en};
     float prio = 1;
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, V.qf, 1, &prio};
@@ -201,6 +221,7 @@ void vk_pipeline_cache_save(void) {
 static vkpool_t g_pool[MAXPOOL]; static int g_npool;
 static pthread_rwlock_t g_pool_mu = PTHREAD_RWLOCK_INITIALIZER;
 static uint32_t g_pool_gen;   // bumped under the write lock when a pool is added or removed: vk_pool_of's per-thread cache holds while it is unchanged
+#ifdef __ANDROID__
 static int recv_fds(int sock, int *fds, int max) {
     char data[4096], ctl[CMSG_SPACE(sizeof(int) * 16)]; struct iovec iov = {data, sizeof data};
     struct msghdr m = {0}; m.msg_iov = &iov; m.msg_iovlen = 1; m.msg_control = ctl; m.msg_controllen = sizeof ctl;
@@ -211,12 +232,16 @@ static int recv_fds(int sock, int *fds, int max) {
             for (size_t i = 0; i < (c->cmsg_len - CMSG_LEN(0)) / sizeof(int) && n < max; i++) fds[n++] = ((int *)CMSG_DATA(c))[i];
     return n;
 }
+#endif
 static const VkBufferUsageFlags POOL_USAGE0 = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
     VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 #define POOL_USAGE (POOL_USAGE0 | (V.has_xfb ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0))   // any pool range may be a transform feedback buffer
 // Zero copy: the pages of [mem, mem+size) become an AHardwareBuffer's, imported as a VkBuffer. 0 on success
 static int pool_zero_copy(vkpool_t *p, uint8_t *mem, uint64_t size) {
+#ifndef __ANDROID__
+    return vkp_pool_zero_copy(p, mem, size, POOL_USAGE);
+#else
     AHardwareBuffer_Desc d = {(uint32_t)size, 1, 1, AHARDWAREBUFFER_FORMAT_BLOB,
         AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN | AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER, 0, 0, 0};
     if (size > 0xffffffffull) return -1;
@@ -243,6 +268,7 @@ static int pool_zero_copy(vkpool_t *p, uint8_t *mem, uint64_t size) {
     if (vkAllocateMemory(V.dev, &ai, NULL, &p->mem) || vkBindBufferMemory(V.dev, p->buf, p->mem, 0)) { vkDestroyBuffer(V.dev, p->buf, NULL); AHardwareBuffer_release(ahb); return -2; }
     p->ahb = ahb; p->zero_copy = 1;
     return 0;
+#endif
 }
 // A zero-copy pool's dma-buf mapped again over [mem, mem+len) in one piece per chunk, read-only (nvn_dirty_defrag: the mappings its protection split never merge). 0 = done
 int vk_pool_remap_ro(void *mem, size_t len) {
@@ -251,26 +277,38 @@ int vk_pool_remap_ro(void *mem, size_t len) {
     for (int i = 0; i < g_npool && !rc; i++) {
         vkpool_t *p = &g_pool[i]; if (p->base != (uint64_t)(uintptr_t)mem || p->end - p->base != len) continue;
         if (!p->zero_copy) { if (!p->shadow) { rc = -1; break; } done += p->hi - p->lo; continue; }   // a copied pool: nothing to map again (its protection stays as it is), and done, so defrag stops taking its pages busy
+#ifndef __ANDROID__
+        rc = vkp_pool_remap_ro(p);
+#else
         int sv[2], fds[16], nfd = -1; if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv)) { rc = -1; break; }
         if (!AHardwareBuffer_sendHandleToUnixSocket(p->ahb, sv[0])) nfd = recv_fds(sv[1], fds, 16);
         close(sv[0]); close(sv[1]);
         void *at = (void *)(uintptr_t)p->lo; rc = nfd >= 1 && mmap(at, p->hi - p->lo, PROT_READ, MAP_SHARED | MAP_FIXED, fds[0], 0) == at ? 0 : -1;
         for (int k = 0; k < nfd; k++) close(fds[k]);
+#endif
         if (!rc) done += p->hi - p->lo;
     }
     pthread_rwlock_unlock(&g_pool_mu);
     return !rc && done == len ? 0 : -1;
 }
 static void pool_copy_back(vkpool_t *p) {   // the pages go back to anonymous memory with the buffer's contents (the game may reuse the memory)
+#ifndef __ANDROID__
+    vkp_pool_copy_back(p);   // a placed map must be unmapped first, before its memory is freed and takes the range with it
+#else
     uint64_t size = p->hi - p->lo; uint8_t *mem = (uint8_t *)(uintptr_t)p->lo;
     uint8_t *save = malloc(size); if (save) memcpy(save, mem, size);
     mmap(mem, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (save) { memcpy(mem, save, size); free(save); }
+#endif
 }
 // Pools over ZC_CHUNK are made of chunks of at most that size, each a pool entry with an AHardwareBuffer of its own: the Adreno 830's gralloc allocator service
 // (vendor.qti.hardware.display.allocator-service, snapalloc) aborts on a BLOB of 812 MB ("ubsan: mul-overflow" in SnapConstraintManager::AlignmentToAlignedConstraints),
 // and the whole Android UI restarts with it; 400 MB ones work (13 Sentinels: Aegis Rim's 0x32c00000-byte pool). A range across two chunks has no buffer (vk_pool_of)
+#ifdef __ANDROID__
 #define ZC_CHUNK 0x10000000ull
+#else
+#define ZC_CHUNK vkp_zc_chunk()   // no gralloc on Linux: as large as the driver allocates (dm/steamos/vk_platform.c)
+#endif
 static void pool_add_one(const void *mem, uint64_t size, uint64_t base, uint64_t end);
 // DM_VK_ZEROCOPY_MAX_MB=<n>: pools bigger than n MB are copied, not zero-copy, and kept whole (a copied pool takes no hardware buffer, so no chunks). The Legion Y700
 // 2023's gralloc aborts the process (no error returned) allocating a hardware buffer for Unicorn Overlord's 860 MB pool, while its pools up to 250 MB are fine
@@ -312,7 +350,11 @@ void mtl_pool_del(const void *mem) {
         pthread_rwlock_unlock(&g_pool_mu);
         if (p.zero_copy) pool_copy_back(&p);
         vk_defer_free_buffer(p.buf, p.mem);   // the AHardwareBuffer goes with the imported memory's last reference
+#ifdef __ANDROID__
         if (p.ahb) AHardwareBuffer_release(p.ahb);
+#else
+        vkp_pool_release(&p);
+#endif
     }
 }
 vkpool_t *vk_pool_of(uint64_t addr, uint64_t len) {

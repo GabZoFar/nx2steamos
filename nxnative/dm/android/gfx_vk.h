@@ -4,9 +4,18 @@
 // Version 1 is correct-first: whole-pipeline barriers between passes, full pipelines with a small dynamic state set, descriptor sets per draw.
 #pragma once
 #define VK_NO_PROTOTYPES
+#ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <android/hardware_buffer.h>
 #include <android/native_window.h>
+typedef ANativeWindow dm_window_t;   // the front end's window (front_android.c dm_front_window)
+#define VK_PLATFORM_FNS(X) X(vkCreateAndroidSurfaceKHR)
+#define VK_PLATFORM_DEV_FNS(X) X(vkGetAndroidHardwareBufferPropertiesANDROID)
+#else   // Linux (SteamOS, nx2steamos): SDL makes the surface, guest pools are exported dma-bufs or placed maps (dm/steamos/vk_platform.c)
+typedef struct dm_window dm_window_t;   // an SDL_Window, opaque here (dm/steamos/front_sdl.c dm_front_window)
+#define VK_PLATFORM_FNS(X)
+#define VK_PLATFORM_DEV_FNS(X) X(vkGetMemoryFdKHR) X(vkMapMemory2KHR) X(vkUnmapMemory2KHR) X(vkUnmapMemory)
+#endif
 #include <vulkan/vulkan.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -24,7 +33,7 @@
     X(vkCreateInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures2) \
     X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceFormatProperties) X(vkCreateDevice) X(vkGetDeviceProcAddr) \
     X(vkEnumerateDeviceExtensionProperties) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
-    X(vkCreateAndroidSurfaceKHR) X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR)
+    VK_PLATFORM_FNS(X) X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR)
 #define VK_DEV_FNS(X) \
     X(vkGetDeviceQueue) X(vkCreateBuffer) X(vkDestroyBuffer) X(vkAllocateMemory) X(vkFreeMemory) X(vkBindBufferMemory) X(vkBindImageMemory) X(vkGetBufferMemoryRequirements) \
     X(vkGetImageMemoryRequirements) X(vkCreateImage) X(vkDestroyImage) X(vkCreateImageView) X(vkDestroyImageView) X(vkCreateSampler) X(vkDestroySampler) X(vkMapMemory) \
@@ -37,7 +46,7 @@
     X(vkCmdSetDepthBias) X(vkCmdSetLineWidth) X(vkCmdDraw) X(vkCmdPushConstants) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDispatch) X(vkCmdDispatchIndirect) \
     X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreateDescriptorSetLayout) X(vkCreatePipelineLayout) X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) X(vkCreateComputePipelines) X(vkCreatePipelineCache) \
     X(vkGetPipelineCacheData) X(vkCreateDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
-    X(vkCreateBufferView) X(vkDestroyBufferView) X(vkGetAndroidHardwareBufferPropertiesANDROID) \
+    X(vkCreateBufferView) X(vkDestroyBufferView) VK_PLATFORM_DEV_FNS(X) \
     X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults) \
     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) \
     X(vkCmdBindTransformFeedbackBuffersEXT) X(vkCmdBeginTransformFeedbackEXT) X(vkCmdEndTransformFeedbackEXT) \
@@ -57,12 +66,26 @@ extern vkdev_t V;
 uint32_t vk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid);
 void vk_init(void);   // once, from mtl_init or the first use
 
-// ---- memory pools (gfx_vk_core.c): the guest's pool memory is GPU memory (AHardwareBuffer mapped over it) ----
-typedef struct { uint64_t lo, hi; VkBuffer buf; VkDeviceMemory mem; void *ahb; int zero_copy; uint8_t *shadow; uint64_t serial, base, end; int flags, synced; uint64_t stamp, stamp0; const void *span; } vkpool_t;   // serial: unique per pool made (caches of views over a pool's buffer key on it); [base, end): the game's pool, of which [lo, hi) is one chunk (ZC_CHUNK); flags: the NVN pool's (vk_pool_set_flags); synced, stamp, stamp0, span: a copied pool's incremental sync
+// ---- memory pools (gfx_vk_core.c): the guest's pool memory is GPU memory (an AHardwareBuffer mapped over it on Android, a dma-buf or a placed map on Linux) ----
+typedef struct { uint64_t lo, hi; VkBuffer buf; VkDeviceMemory mem; void *ahb; int zero_copy; uint8_t *shadow; uint64_t serial, base, end; int flags, synced; uint64_t stamp, stamp0; const void *span;
+                 int zc_kind, fd; } vkpool_t;   // zc_kind, fd: how a Linux zero-copy pool is mapped (VKP_ZC_*) and its dma-buf (dm/steamos/vk_platform.c)   // serial: unique per pool made (caches of views over a pool's buffer key on it); [base, end): the game's pool, of which [lo, hi) is one chunk (ZC_CHUNK); flags: the NVN pool's (vk_pool_set_flags); synced, stamp, stamp0, span: a copied pool's incremental sync
 vkpool_t *vk_pool_of(uint64_t addr, uint64_t len);   // the pool containing [addr, addr+len), NULL if none
 int vk_buf_at(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // GPU buffer + offset of a pool address range
 // Pools that could not be made zero-copy keep a GPU copy refreshed before each submission (vk_pools_sync, called from mtl_sub_commit)
 void vk_pools_sync(VkCommandBuffer cb);
+#ifndef __ANDROID__
+// ---- the Linux platform (dm/steamos/vk_platform.c): what Android does with its NDK calls ----
+enum { VKP_ZC_NONE, VKP_ZC_DMABUF, VKP_ZC_PLACED };
+const char *const *vkp_instance_exts(uint32_t *n);   // the window system's surface extensions (none without a window)
+void vkp_device_exts(const VkExtensionProperties *ex, uint32_t ne, const char **on, uint32_t *non, VkBaseOutStructure *tail);   // enables what the platform uses, chains its features after tail
+int vkp_surface(dm_window_t *w, VkSurfaceKHR *out);   // 0 = made
+void vkp_window_size(dm_window_t *w, uint32_t *width, uint32_t *height);   // in pixels
+int vkp_pool_zero_copy(vkpool_t *p, uint8_t *mem, uint64_t size, VkBufferUsageFlags usage);   // 0 = the pages of [mem, mem+size) are GPU memory now, p->buf / p->mem set
+int vkp_pool_remap_ro(vkpool_t *p);   // 0 = the chunk is mapped again read-only in one piece (nvn_dirty_defrag)
+void vkp_pool_copy_back(vkpool_t *p);   // the chunk's pages back to anonymous memory, with their contents (before its memory is freed)
+void vkp_pool_release(vkpool_t *p);     // after vk_defer_free_buffer
+uint64_t vkp_zc_chunk(void);            // the largest zero-copy chunk
+#endif
 
 // ---- submissions (gfx_vk_core.c) ----
 typedef struct vksub vksub_t;

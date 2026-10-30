@@ -47,7 +47,15 @@ static void tsd_check(void) {
 // Android: bionic owns tpidr_el0 (its TLS) and 64-bit tasks read 0 from tpidrro_el0. Each thread that runs guest code gets a block of slots whose address
 // sits in bionic's TLS_SLOT_APP (tpidr_el0[2], reserved for app use); the "keys" are indices 1..4 into it (0 stays unused: the loader takes a 0 key page
 // entry as a missing key), and the rewriter (DM_TARGET=android) reads a slot as tpidr_el0[2] + key page entry. The block is freed when the thread exits.
+// Linux with glibc (SteamOS, DM_TARGET=linux): the same blocks, but glibc's static TLS starts at tpidr_el0 + 16, so tpidr_el0[2] is the host's own TLS
+// there; the block hangs off tpidr_el0[1], the second word of glibc's TCB (tcbhead_t.private), which glibc on aarch64 neither reads nor writes
+#if defined(__ANDROID__)
 #define TLS_SLOT_APP 2
+#define TLS_SLOT_NAME "bionic's TLS_SLOT_APP"
+#else
+#define TLS_SLOT_APP 1
+#define TLS_SLOT_NAME "glibc's tcbhead_t.private"
+#endif
 #define TSD_SLOTS 8
 static pthread_key_t g_tsd_free;
 static uint64_t **tp_now(void) { uint64_t **tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp)); return tp; }
@@ -65,11 +73,11 @@ void *dm_tsd_get(pthread_key_t k) { return (void *)(uintptr_t)tsd_block()[k]; }
 static void create_keys(void) {
     if (pthread_key_create(&g_tsd_free, tsd_block_free)) die("cannot create the slot block key");
     uint64_t **tp = tp_now();
-    if (tp[TLS_SLOT_APP]) die("bionic's TLS_SLOT_APP is already in use on this thread (%p): the guest thread slots cannot live there", (void *)tp[TLS_SLOT_APP]);
+    if (tp[TLS_SLOT_APP]) die(TLS_SLOT_NAME " is already in use on this thread (%p): the guest thread slots cannot live there", (void *)tp[TLS_SLOT_APP]);
     g_key18 = 1; g_keytls = 2; g_keytlr = 3; g_keygate = 4;
     LOG("guest thread slots in TLS_SLOT_APP blocks: K18=%lu KTLS=%lu KTLR=%lu KGATE=%lu", (unsigned long)g_key18, (unsigned long)g_keytls, (unsigned long)g_keytlr, (unsigned long)g_keygate);
 }
-// K slot check: the slot the rewritten code reads (tpidr_el0[2] + the key page entry) is the one dm_tsd_set wrote
+// K slot check: the slot the rewritten code reads (tpidr_el0[TLS_SLOT_APP] + the key page entry) is the one dm_tsd_set wrote
 static void tsd_check(void) {
     dm_tsd_set(g_key18, (void *)0x1234);
     uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
@@ -238,8 +246,10 @@ static void read_layout(module_t *m, const char *dir) {
     fclose(f);
 #if defined(__APPLE__)
     static const char *const want = "apple";
-#else
+#elif defined(__ANDROID__)
     static const char *const want = "android";
+#else
+    static const char *const want = "linux";
 #endif
     if (strcmp(target, want)) die("%s: the module was rewritten for %s, this host runs on %s: rewrite it with DM_TARGET=%s dm/tools/patch_nso.py", path, target, want, want);
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)

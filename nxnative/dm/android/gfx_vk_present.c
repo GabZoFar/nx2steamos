@@ -1,9 +1,13 @@
 // Android port, Vulkan backend: presentation (see gfx_vk.h).
-// With a window (the app's ANativeWindow, dm_front_window): the game's swap chain texture is scaled into a Vulkan swapchain image (aspect kept, black borders) and
+// With a window (the app's ANativeWindow on Android, the SDL window on SteamOS: dm_front_window): the game's swap chain texture is scaled into a Vulkan swapchain image (aspect kept, black borders) and
 // presented with FIFO (vsync) pacing. Headless (dmhost from adb shell): frames are counted, and DM_VK_SHOT=n1,n2,... writes those presented frames as PPM files to
 // DM_VK_SHOT_DIR (default DM_ROOT), which is how a run without a screen is checked.
 #include "gfx_vk.h"
+#ifdef __ANDROID__
 #include <android/native_window.h>
+#else
+int front_screen_max_fps(void);   // dm/steamos/front_sdl.c: the display's refresh rate
+#endif
 #include <string.h>
 #include <math.h>
 #include <time.h>
@@ -12,7 +16,7 @@
 #include "overlay_vert.spv.h"
 #include "overlay_frag.spv.h"
 
-__attribute__((weak)) ANativeWindow *dm_front_window(void) { return NULL; }
+__attribute__((weak)) dm_window_t *dm_front_window(void) { return NULL; }
 static uint64_t g_presents;
 // Vulkan present IDs include overlay redraws; only the game's tickets have a time for the NVN frame statistics.
 enum { PRES_TIMES = 64 };
@@ -49,7 +53,7 @@ static double present_time_get(uint64_t ticket) {
 }
 static VkSurfaceKHR g_surf; static VkSwapchainKHR g_swap; static VkImage g_simg[8]; static uint32_t g_nsimg; static VkExtent2D g_sext; static VkFormat g_sfmt;
 static VkSemaphore g_acq[8], g_done_sem[8]; static VkFence g_pfence[8]; static VkCommandPool g_ppool; static VkCommandBuffer g_pcb[8]; static uint32_t g_pi;
-static ANativeWindow *g_win;
+static dm_window_t *g_win;
 static VkImageView g_sview[8];
 // Where the game's picture lies in the window (fractions: x, y, width, height; aspect kept, black borders around it), for the front end's touch points, which hle_touch.c
 // takes relative to the picture: normalized by the whole window, a tap in Unpacking's 3040x1904 window (97 px borders) was off by up to 5% of the height
@@ -72,22 +76,45 @@ static void swap_destroy(void) {
                   vkDestroySwapchainKHR(V.dev, g_swap, NULL); g_swap = VK_NULL_HANDLE; }
     if (g_surf) { vkDestroySurfaceKHR(V.inst, g_surf, NULL); g_surf = VK_NULL_HANDLE; }
 }
+#ifndef __ANDROID__
+static void swap_rebuild(void) {   // the swapchain made again on the same surface (a new size)
+    VkSurfaceKHR keep = g_surf; g_surf = VK_NULL_HANDLE; swap_destroy(); g_surf = keep;
+}
+#endif
 static int swap_make(void) {
-    ANativeWindow *w = dm_front_window();
+    dm_window_t *w = dm_front_window();
     if (w != g_win) { swap_destroy(); g_win = w; }
     if (!w) return 0;
     if (g_swap) return 1;
+#ifdef __ANDROID__
     VkAndroidSurfaceCreateInfoKHR si = {VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, NULL, 0, w};
-    if (vkCreateAndroidSurfaceKHR(V.inst, &si, NULL, &g_surf)) return 0;
+    if (!g_surf && vkCreateAndroidSurfaceKHR(V.inst, &si, NULL, &g_surf)) return 0;
+#else
+    if (!g_surf && vkp_surface(w, &g_surf)) return 0;   // SDL's, made on the main thread (dm/steamos/vk_platform.c); kept across a swapchain made again
+#endif
     VkSurfaceCapabilitiesKHR caps; vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.pd, g_surf, &caps);
     uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, NULL); VkSurfaceFormatKHR sf[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(V.pd, g_surf, &nf, sf);
-    g_sfmt = sf[0].format; for (uint32_t i = 0; i < nf; i++) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM) g_sfmt = sf[i].format;
+    // a UNORM format: the game's picture is already encoded, and an sRGB swapchain (Mesa lists B8G8R8A8_SRGB first) would encode it again
+    g_sfmt = sf[0].format; for (uint32_t i = nf; i-- > 0;) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM || (sf[i].format == VK_FORMAT_B8G8R8A8_UNORM && g_sfmt != VK_FORMAT_R8G8B8A8_UNORM)) g_sfmt = sf[i].format;
+#ifdef __ANDROID__
     g_sext = (VkExtent2D){(uint32_t)ANativeWindow_getWidth(w), (uint32_t)ANativeWindow_getHeight(w)};   // the window as it is now; Android's compositor rotates (identity transform)
+#else
+    vkp_window_size(w, &g_sext.width, &g_sext.height);   // Wayland reports no current extent (0xFFFFFFFF): the window's size in pixels
+#endif
     if (!g_sext.width || !g_sext.height) g_sext = caps.currentExtent;
+    if (caps.maxImageExtent.width && g_sext.width > caps.maxImageExtent.width) g_sext.width = caps.maxImageExtent.width;
+    if (caps.maxImageExtent.height && g_sext.height > caps.maxImageExtent.height) g_sext.height = caps.maxImageExtent.height;
+    if (g_sext.width < caps.minImageExtent.width) g_sext.width = caps.minImageExtent.width;
+    if (g_sext.height < caps.minImageExtent.height) g_sext.height = caps.minImageExtent.height;
+#ifdef __ANDROID__
+    VkCompositeAlphaFlagBitsKHR alpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+#else   // opaque: on Wayland the picture's alpha would otherwise show the desktop through it
+    VkCompositeAlphaFlagBitsKHR alpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+#endif
     uint32_t n = caps.minImageCount < 3 ? 3 : caps.minImageCount; if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
     VkSwapchainCreateInfoKHR ci = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, NULL, 0, g_surf, n, g_sfmt, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, g_sext, 1,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-        (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) ? VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR : VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_PRESENT_MODE_FIFO_KHR, 1, VK_NULL_HANDLE};
+        alpha, VK_PRESENT_MODE_FIFO_KHR, 1, VK_NULL_HANDLE};
     VkResult r = vkCreateSwapchainKHR(V.dev, &ci, NULL, &g_swap);
     if (r) { VKLOG("[RED] swapchain creation failed: %d", r); swap_destroy(); return 0; }
     g_nsimg = 8; vkGetSwapchainImagesKHR(V.dev, g_swap, &g_nsimg, g_simg);
@@ -506,7 +533,11 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     uint32_t k = g_pi++ % 8;
     vkWaitForFences(V.dev, 1, &g_pfence[k], 1, UINT64_MAX);
     uint32_t idx; VkResult r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx);
+#ifdef __ANDROID__
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_destroy(); if (!swap_make()) return; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
+#else
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) { swap_rebuild(); if (!swap_make()) return; r = vkAcquireNextImageKHR(V.dev, g_swap, UINT64_MAX, g_acq[k], VK_NULL_HANDLE, &idx); }
+#endif
     if (r < 0) { VKRED_ONCE(90, "vkAcquireNextImageKHR: %d", r); return; }
     vkResetFences(V.dev, 1, &g_pfence[k]);
     VkCommandBuffer cb = g_pcb[k];
@@ -551,7 +582,11 @@ static void present_window(vkimg_t *im, const int crop[4], double period, uint64
     r = vkQueuePresentKHR(V.q, &pi);
     if (V.has_dtiming && r >= 0) present_time_map(ptm.presentID, ticket);
     pthread_mutex_unlock(&g_vk_queue_mu);
+#ifdef __ANDROID__
     if (r == VK_ERROR_OUT_OF_DATE_KHR) swap_destroy();
+#else   // a window resized (Desktop Mode) makes the swapchain suboptimal: made again at the next present, at the new size
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) swap_rebuild();
+#endif
 }
 // headless frame shots
 static int shot_wanted(uint64_t n) {
@@ -631,14 +666,14 @@ static uint64_t present_enqueue(vkimg_t *im, const int crop[4], uint64_t n, doub
     pthread_mutex_unlock(&g_pq_mu);
     return n;
 }
-void dm_perf_frame(double period); void dm_perf_window(ANativeWindow *w, double fps); void dm_perf_frame_cost(int64_t ns);   // perf_android.c
+void dm_perf_frame(double period); void dm_perf_window(dm_window_t *w, double fps); void dm_perf_frame_cost(int64_t ns);   // perf_android.c
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     vk_init();
     { uint64_t vk_replay_ns(void); double vk_gpu_ms_recent(void);   // what else the frame costs: its replay and its GPU time
       static uint64_t last_exec; uint64_t ex = vk_replay_ns(), rp = ex - last_exec; last_exec = ex; double g = vk_gpu_ms_recent(); int64_t gn = g > 0 ? (int64_t)(g * 1e6) : 0;
       dm_perf_frame_cost((int64_t)rp > gn ? (int64_t)rp : gn); }
     dm_perf_frame(period);   // paced to the game's frame period, and its work time reported to ADPF
-    static ANativeWindow *rate_win; static double rate_period;
+    static dm_window_t *rate_win; static double rate_period;
     if (g_win && (g_win != rate_win || period != rate_period)) { rate_win = g_win; rate_period = period; dm_perf_window(g_win, period > 0 ? 1.0 / period : 60); }
     uint64_t n = ++g_presents;
     // without display times (no VK_GOOGLE_display_timing, no window, or none came back) the hand-over time stands in, as before: the governor's late check needs readings
@@ -684,7 +719,11 @@ uint32_t mtl_present_qos(void) { return 0; }
 int mtl_link_active(void) { return 0; }
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
 int mtl_has_window(void) { return dm_front_window() != NULL; }
+#ifdef __ANDROID__
 int mtl_display_hz(void) { return 60; }
+#else
+int mtl_display_hz(void) { int hz = front_screen_max_fps(); return hz > 0 ? hz : 60; }
+#endif
 int mtl_fps_target(void) { return DM_GAME_FPS_TARGET > 0 ? DM_GAME_FPS_TARGET : 60; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_prog_release(prog_t *p) { (void)p; }

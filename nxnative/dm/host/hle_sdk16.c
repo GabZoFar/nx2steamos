@@ -93,6 +93,12 @@ static font_t font_get(int type) {
                      // screen (the button at the top left of a room) waited for it for good: the game froze at the "[RED] cannot open the standard shared font" line
                      std_f = font_first("DM_SHARED_FONT", "standard.ttf", "/system/fonts/RobotoStatic-Regular.ttf");
                      if (!std_f.p) std_f = font_first("DM_SHARED_FONT", "standard.ttf", "/system/fonts/Roboto-Regular.ttf");
+#elif defined(__linux__)
+                     // Linux (SteamOS): the system's own Latin fonts, static TTFs first; SteamOS's desktop font is Noto Sans (Arch's noto-fonts), Debian's paths follow
+                     static const char *const sys_fonts[] = {"/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"};
+                     for (size_t i = 0; i < sizeof sys_fonts / sizeof *sys_fonts && !std_f.p; i++) std_f = font_first("DM_SHARED_FONT", "standard.ttf", sys_fonts[i]);
 #else
                      std_f = font_first("DM_SHARED_FONT", "standard.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf");
 #endif

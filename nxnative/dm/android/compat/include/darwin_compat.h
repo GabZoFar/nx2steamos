@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include <pthread.h>
+#include <stdbool.h>   // Darwin's and bionic's headers bring bool along; glibc's do not (hle_uemalloc.c)
 #include <stddef.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -20,7 +21,9 @@ int dm_setname_self(const char *name);
 void *pthread_get_stackaddr_np(pthread_t t);
 size_t pthread_get_stacksize_np(pthread_t t);
 int pthread_threadid_np(pthread_t t, uint64_t *id);
-static inline int getdtablesize(void) { return (int)sysconf(_SC_OPEN_MAX); }
+#ifdef __ANDROID__
+static inline int getdtablesize(void) { return (int)sysconf(_SC_OPEN_MAX); }   // (glibc has its own)
+#endif
 #include <time.h>
 #ifndef DM_CLOCK_NSEC_NP
 #define DM_CLOCK_NSEC_NP
