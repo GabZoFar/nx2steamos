@@ -722,7 +722,22 @@ NVN(nvnTextureGetStorageSize) {
     RET(nvn_texture_flags_pitch(t->flags) && t->stride ? t->stride * t->height : tegra_total_size(&t->layout));
 }
 NVN(nvnTextureGetDebugID) { RET(TEX->debug_id); }
-NVN(nvnTextureGetViewOffset) { RET(0); }
+// (texture, view): where the view's first level and layer start in the texture's storage, in bytes. Tears of the
+// Kingdom asks it for each level and layer it fills from the CPU (its TexToGo textures; the terrain's 121-layer
+// material arrays, one zstd frame per layer and level): it returned 0, so every level and layer was written over the
+// start of level 0 and the rest stayed zero (flat white and black surfaces, smaller levels empty: characters dark,
+// half drawn or gone at a distance). Block-linear storage: the layer's stride times the layer plus the level's offset
+// within a layer (3D textures: the level's offset); pitch storage has one level and layer.
+NVN(nvnTextureGetViewOffset) {
+    NvnTexture *t = TEX;
+    const NvnTextureView *v = A(1) ? (const NvnTextureView *)AP(1) : NULL;
+    if (!t || !v || !t->layout.fmt || nvn_texture_flags_pitch(t->flags)) { RET(0); return; }
+    uint32_t level = v->setmask & 1 ? v->base_level : 0, layer = v->setmask & 2 ? v->min_layer : 0;
+    if (level >= t->layout.levels) { RET(0); return; }
+    uint64_t off = tegra_level(&t->layout, level).offset;
+    if (t->target != 2) off += (uint64_t)layer * tegra_layer_size(&t->layout);
+    RET(off);
+}
 NVN(nvnTextureGetStorageClass) { RET(0); }
 NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
