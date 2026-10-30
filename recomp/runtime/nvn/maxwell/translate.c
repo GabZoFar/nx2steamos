@@ -136,7 +136,8 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
-    if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
+    if (dyn && off < 0) sprintf(buf, "cbr(cb%d, (%s) - %lldu)", idx, dyn, (long long)-off);
+    else if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
 }
@@ -1244,7 +1245,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         for (int i = 0; i < n; i++) attr_store(c, d + i, addr + 4 * i);
     } else if (OPM(0xef90000000000000ull, 0xfff8000000000000ull)) {  // LD c[idx][reg + imm]
         int idx = (int)bits(w, 36, 5);
-        int64_t off = (int64_t)bits(w, 20, 16);  // unsigned (Ryujinx InstLdc.CbufOffset)
+        // The offset is signed against a register (yuzu's decoder: BitField<20, 16, s64>): Tears of the Kingdom's
+        // skinning reads its bone matrices at c[5][bone * 48 - 0x20 ...]; read as 0xffe0 past the register, every one
+        // came from the clamped end of the buffer and Link's tunic and hair were thrown across the screen as spikes.
+        // Without a register it stays unsigned, as before.
+        int64_t off = a == RZ ? (int64_t)bits(w, 20, 16) : (int64_t)(int16_t)bits(w, 20, 16);
         int sz = (int)bits(w, 48, 3);
         int n = sz == 5 ? 2 : 1;
         char rb[16];

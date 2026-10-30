@@ -19,7 +19,7 @@ A first run on an ARM64 device: `python -m porter device` (what it is), the prob
 | Game | Title ID | Steam Deck (`recomp/`) | Through nx2steamos (`deck.tsv`) |
 |---|---|---|---|
 | The Legend of Zelda: Breath of the Wild 1.8.2, 1.9.0 | `01007EF00011E000` | Savage Wind's game: the opening and the Great Plateau, played by its testers, about 40 fps on a Deck with the 60 fps cap | untested: the porter makes its folder (`--engine recomp`) |
-| The Legend of Zelda: Tears of the Kingdom 1.4.3 | `0100F2C0115B6000` | runs on a Steam Deck (2026-10-30): menus, saves, the opening and its cutscenes lit and textured, at 30 fps (60 where its frames allow) with sound; part of Link drawn as spikes ([RECOMP.md](RECOMP.md), "Games") | experimental: `deck.tsv` selects the site-free runtime path; custom AppImage required |
+| The Legend of Zelda: Tears of the Kingdom 1.4.3 | `0100F2C0115B6000` | runs on a Steam Deck (2026-10-30): menus, saves, the opening and its cutscenes lit and textured, characters drawn, at 30 fps (60 where its frames allow) with sound ([RECOMP.md](RECOMP.md), "Games") | experimental: `deck.tsv` selects the site-free runtime path; custom AppImage required |
 
 ## Games on ARM64 SteamOS
 
