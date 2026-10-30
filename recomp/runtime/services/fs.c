@@ -491,6 +491,7 @@ static void rom_index(int fd) {
 // 0x71014b854e in the Ghidra project, read by FUN_7100d4b57c and FUN_7100d4bca0); "%s" leaves just "Savage Wind
 // <version>". Called once main is loaded; anything else at that address is left alone.
 void fs_title_version_patch(void) {
+    if (!g_site.title_version_format) return;
     char *fmt = (char *)(uintptr_t)g_site.title_version_format;
     if (memcmp(fmt, "Ver.%s", 7)) { LOG("[fs] title version: \"Ver.%%s\" not found, left as is\n"); return; }
     memcpy(fmt, "%s", 3);

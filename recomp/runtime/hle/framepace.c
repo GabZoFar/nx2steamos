@@ -64,13 +64,14 @@ static int env_int(const char *name, int def) {
 bool framepace_on(void) {
     static int on = -1;
     if (on < 0) on = env_int("SAVAGEWIND_FRAMEPACE", 1) != 0;
-    return on;
+    return on && g_site.pause_state && g_site.screen_mgr && g_site.event_mgr && g_site.controller_step;
 }
 
 // ------------------------------------------------------------------ the frame rate
 // The menus: the game is paused (pause menu, map), or the title screen's menu is up (screen 1 in the UI screen
 // manager [screen_mgr]: +0x28 count, +0x30 screens by id).
 static bool in_menu(void) {
+    if (!g_site.pause_state || !g_site.screen_mgr) return false;
     if (*(uint32_t *)(uintptr_t)PAUSE_STATE) return true;
     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
     return mgr && VF(uint32_t, mgr, 0x28) > 1 && VF(uint64_t, mgr, 0x30) &&
@@ -81,6 +82,7 @@ static bool in_menu(void) {
 // +0x1d2b8, as hasActiveEvent, 1.8.2 0x7000ffa208, reads it; the time of day stands still meanwhile). Some of their
 // waits count frames: the new game's opening gave Link control 2 s early at 60 fps, 3 s at 120.
 static bool in_event(void) {
+    if (!g_site.event_mgr) return false;
     uint64_t evt = *(uint64_t *)(uintptr_t)g_site.event_mgr;
     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
 }
@@ -89,6 +91,7 @@ bool framepace_in_event(void) { return in_event(); }
 
 // The game's UI screen `id` exists (the screen manager's array; ids as runtime/ui/game_options.mm uses them)
 static bool screen_up(uint32_t id) {
+    if (!g_site.screen_mgr) return false;
     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
     if (!mgr || VF(uint32_t, mgr, 0x28) <= id) return false;
     uint64_t arr = VF(uint64_t, mgr, 0x30);
@@ -99,7 +102,7 @@ static bool screen_up(uint32_t id) {
 bool framepace_title_ui(void) { return screen_up(1) || screen_up(0x38); }
 
 // (pause state 2: the pause menu's pages and the map; 4 is the quick menus over the game)
-bool framepace_menu_ui(void) { return *(uint32_t *)(uintptr_t)PAUSE_STATE == 2; }
+bool framepace_menu_ui(void) { return g_site.pause_state && *(uint32_t *)(uintptr_t)PAUSE_STATE == 2; }
 
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
@@ -203,6 +206,7 @@ static void clock_probe(uint64_t vfr);
 static void log_screens(void);
 
 void rt_vfr_update(uint64_t vfr) {
+    if (!g_site.pause_state) return;
     extern bool nvn_timeline(void);
     if (nvn_timeline()) LOG("[tl] %.3f %x vfr\n", plat_now_ns() / 1e6, kernel_current_thread_handle());
     extern uint64_t g_fs_vfr;  // (SAVAGEWIND_FRAME_LOG=2, nvn/objects.c)
@@ -270,7 +274,7 @@ void rt_vfr_update(uint64_t vfr) {
     VF(uint8_t, vfr, VFR_CHANGED) = last_iv && iv != last_iv;
     last_iv = iv;
     if (log_every > 0 && nframe++ % (uint64_t)log_every == 0) {
-        uint64_t pinfo = *(uint64_t *)(uintptr_t)g_site.player_info;  // (Link's position: PlayerInfo +0x88)
+        uint64_t pinfo = g_site.player_info ? *(uint64_t *)(uintptr_t)g_site.player_info : 0;  // (Link's position: PlayerInfo +0x88)
         LOG("[framepace] target %d fps, %.2f ms since the last update (avg %.2f), ratio %.3f, interval %u, owed "
             "%.2f ms, Link %.3f %.3f%s\n", framepace_target(), s * 1e3, smooth * 1e3, ratio, iv, (real - given) * 1e3,
             pinfo ? VF(float, pinfo, 0x88) : 0.0f, pinfo ? VF(float, pinfo, 0x90) : 0.0f,
@@ -296,7 +300,7 @@ uint64_t framepace_script_frame(uint64_t presented) {
         static const char *next;
         static int init;
         if (!init) init = 1, next = getenv("SAVAGEWIND_DUMP_DATA_AT");
-        if (next && *next && (uint64_t)t >= strtoull(next, NULL, 10)) {
+        if (next && *next && g_site.main_data && (uint64_t)t >= strtoull(next, NULL, 10)) {
             char path[64];
             snprintf(path, sizeof path, "build/data_%llu.bin", (unsigned long long)t);
             FILE *f = fopen(path, "wb");
@@ -327,12 +331,12 @@ static void clock_probe(uint64_t vfr) {
     next += (uint64_t)every * 1000000ull;
     if (next < now) next = now + (uint64_t)every * 1000000ull;
     float tod = -1, pos[3] = {0, 0, 0}, stamina = -1;
-    uint64_t wm = *(uint64_t *)(uintptr_t)g_site.world_mgr;
+    uint64_t wm = g_site.world_mgr ? *(uint64_t *)(uintptr_t)g_site.world_mgr : 0;
     if (wm && VF(uint32_t, wm, 0x5c0)) {
         uint64_t mgrs = VF(uint64_t, wm, 0x5c8), tm = mgrs ? *(uint64_t *)(uintptr_t)mgrs : 0;
         if (tm) tod = VF(float, tm, 0xb8);
     }
-    uint64_t pinfo = *(uint64_t *)(uintptr_t)g_site.player_info;
+    uint64_t pinfo = g_site.player_info ? *(uint64_t *)(uintptr_t)g_site.player_info : 0;
     if (pinfo) {
         for (int i = 0; i < 3; i++) pos[i] = VF(float, pinfo, 0x88 + 4 * i);
         stamina = VF(float, pinfo, 0xa4);
@@ -347,7 +351,7 @@ static void log_screens(void) {
     static int on = -1;
     static char last[1024];
     if (on < 0) on = env_int("SAVAGEWIND_LOG_SCREENS", 0);
-    if (!on) return;
+    if (!on || !g_site.screen_mgr || !g_site.pause_state) return;
     uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
     if (!mgr) return;
     uint32_t n = VF(uint32_t, mgr, 0x28);

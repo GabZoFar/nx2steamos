@@ -20,6 +20,7 @@
 
 const char *g_romfs_dir;
 uint64_t g_program_id;
+uint32_t g_system_resource_size;
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
@@ -169,6 +170,8 @@ static void boot(const char *root) {
     dispatch_init();
     { extern void jpeg_debug_init(void); jpeg_debug_init(); }
 
+    g_program_id = 0;
+    g_system_resource_size = 0;
     uint32_t stack_size = 0x100000;
     int prio = 44;
     FILE *f = fopen(npdm_path, "rb");
@@ -177,6 +180,7 @@ static void boot(const char *root) {
         size_t n = fread(npdm, 1, sizeof npdm, f);
         if (n >= 0x80 && !memcmp(npdm, "META", 4)) {
             prio = npdm[0xE];
+            memcpy(&g_system_resource_size, npdm + 0x14, sizeof g_system_resource_size);
             stack_size = *(uint32_t *)(npdm + 0x1C);
             uint32_t aci = *(uint32_t *)(npdm + 0x70);  // ACI0: the program id at +0x10
             if (aci + 0x18 <= n && !memcmp(npdm + aci, "ACI0", 4)) g_program_id = *(uint64_t *)(npdm + aci + 0x10);

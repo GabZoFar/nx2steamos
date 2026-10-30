@@ -1,6 +1,6 @@
 """tools/game_sites.py without game files: the lists agree, and patterns find made-up code wherever it moves.
 
-- VERSIONS == runtime/game_versions.h (the configuration screen's list), the runtime's sites (runtime/game_sites.h)
+- VERSIONS are included in runtime/game_versions.h (which can also hold site-free games), the runtime's sites (runtime/game_sites.h)
   and tools/patches.py's are all in SITES, and every supported version's KNOWN table lists every site;
 - patterns: the masks keep an instruction's own bits and drop what moves (branch offsets, ADRP pages, the low 12
   bits an ADD / LDR / STR adds to a page in the pattern); the same code at another address, with other targets, is
@@ -85,9 +85,9 @@ def image(fn_at, data, got, callee, got_value, filler=0x40):
 def main():
     # ---- the lists agree
     h = open(os.path.join(ROOT, 'runtime', 'game_versions.h'), encoding='utf-8').read()
-    hv = re.findall(r'X\("([^"]*)", "([0-9a-f]*)", ([01]), \d+\)', h)  # (the RomFS file count is the setup's alone)
-    check(hv == [(v.name, v.build_id, str(int(v.supported))) for v in gs.VERSIONS],
-          f'runtime/game_versions.h {hv} == game_sites.VERSIONS')
+    hv = re.findall(r'X\("([^"]*)", "([0-9a-f]*)", ([01]), \d+, "[^"]+", [01]\)', h)
+    check(all((v.name, v.build_id, str(int(v.supported))) in hv for v in gs.VERSIONS),
+          f'runtime/game_versions.h includes game_sites.VERSIONS: {hv}')
     names = {s.name for s in gs.SITES}
     check(len(names) == len(gs.SITES), 'site names are unique')
     rt = re.findall(r'X\((\w+)\)', open(os.path.join(ROOT, 'runtime', 'game_sites.h'), encoding='utf-8').read())

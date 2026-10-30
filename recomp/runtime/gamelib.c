@@ -74,9 +74,11 @@ const char *gamelib_cpu_problem(void) {
 GameSites g_site;
 const char *g_game_version = "";
 
-// g_site from the library's sites: every one runtime/game_sites.h names has to be there (the library and this build
-// come from the same tools/game_sites.py, or their GAMELIB_IDs would differ).
+// g_site from the library's sites: a site-free game has none; a site-based game must have every runtime site.
 static bool take_sites(const GameLibTables *t) {
+    memset(&g_site, 0, sizeof g_site);
+    g_game_version = t->version;
+    if (!*t->nsites) return true;
     static const struct {
         const char *name;
         size_t off;
@@ -94,7 +96,6 @@ static bool take_sites(const GameLibTables *t) {
         }
         *(uint64_t *)((char *)&g_site + want[i].off) = t->sites[k].addr;
     }
-    g_game_version = t->version;
     return true;
 }
 

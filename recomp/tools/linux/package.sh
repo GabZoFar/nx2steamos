@@ -90,6 +90,29 @@ case $ARCH in
 esac
 chmod +x build/linux/src/appimagetool-x86_64.AppImage
 mkdir -p build/dist && rm -f "$OUT"
-APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH build/linux/src/appimagetool-x86_64.AppImage --no-appstream \
-    --runtime-file "build/linux/src/runtime-$ARCH" "$APPDIR" "$OUT"
+TOOL=build/linux/src/appimagetool-x86_64.AppImage
+EXTRACTED=build/linux/src/appimagetool-extracted
+if [ -x "$EXTRACTED/AppRun" ]; then
+    ARCH=$ARCH "$EXTRACTED/AppRun" --no-appstream --runtime-file "build/linux/src/runtime-$ARCH" "$APPDIR" "$OUT"
+elif ! APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH "$TOOL" --no-appstream --runtime-file "build/linux/src/runtime-$ARCH" "$APPDIR" "$OUT"; then
+    # Rosetta can run the tool inside the AppImage, but not its static PIE launcher.
+    OFFSET=$(python3 - "$TOOL" <<'PY'
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+start = 0
+while (at := b.find(b'hsqs', start)) >= 0:
+    start = at + 4
+    if at + 96 > len(b): continue
+    inodes, _, block = struct.unpack_from('<III', b, at + 4)
+    major, minor = struct.unpack_from('<HH', b, at + 28)
+    if inodes and 4096 <= block <= 1048576 and (major, minor) == (4, 0):
+        print(at)
+        break
+else:
+    raise SystemExit('appimagetool: SquashFS payload not found')
+PY
+)
+    unsquashfs -o "$OFFSET" -d "$EXTRACTED" "$TOOL" >/dev/null
+    ARCH=$ARCH "$EXTRACTED/AppRun" --no-appstream --runtime-file "build/linux/src/runtime-$ARCH" "$APPDIR" "$OUT"
+fi
 ls -la "$OUT"

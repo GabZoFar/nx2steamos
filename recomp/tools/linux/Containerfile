@@ -5,7 +5,7 @@
 FROM docker.io/library/ubuntu:22.04
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git file xz-utils patchelf make cmake ninja-build pkg-config nasm python3 \
+        ca-certificates curl git file xz-utils patchelf squashfs-tools make cmake ninja-build pkg-config nasm python3 \
         g++ software-properties-common gpg-agent \
         # SDL3's video / audio / input backends (it loads them at run time; the headers decide what it can use)
         libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \

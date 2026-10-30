@@ -154,6 +154,7 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 // Fatal error without a terminal: say so in a message box rather than vanishing (the details are in the log).
 void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
+    if (getenv("SAVAGEWIND_NO_FATAL_DIALOG")) return;
     fflush(stderr);
     char text[1200];
     snprintf(text, sizeof text, "Savage Wind stopped because of an error.\n\nDetails: %s", g_log_path);

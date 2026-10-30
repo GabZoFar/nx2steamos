@@ -128,15 +128,17 @@ static bool nso_build_id(const std::string &main_path, std::string *hex) {
 
 // The game versions this build sets up (runtime/game_versions.h), told by the main module's build id (its first 8
 // bytes; tools/sw_probe.py prints it). A known version that isn't supported yet is refused with its own message. The
-// RomFS that goes with it is checked before the setup copies anything: its System/Version.txt and about how many files
-// it has with the update applied over the base game (check_romfs).
+// RomFS that goes with it is checked before the setup copies anything: its marker and about how many files it has
+// with the update applied over the base game (check_romfs).
 struct GameVersion {
     const char *name, *id;
     bool supported;
     unsigned romfs_files;  // (0: not counted)
+    const char *romfs_marker;
+    bool sites;
 };
 static const GameVersion VERSIONS[] = {
-#define GAME_VERSION_ENTRY(v, id, ok, files) {v, id, ok, files},
+#define GAME_VERSION_ENTRY(v, id, ok, files, marker, sites) {v, id, ok, files, marker, sites},
     GAME_VERSIONS(GAME_VERSION_ENTRY)
 #undef GAME_VERSION_ENTRY
 };
@@ -189,6 +191,17 @@ static unsigned count_files(const std::string &dir, unsigned enough, unsigned n 
 // A common mistake used to pass this far and the game then failed with no explanation: the update's ExeFS with the
 // cartridge's RomFS, which says its own older version, or with the update's RomFS alone, which has far fewer files.
 static std::string check_romfs(const std::string &romfs, const GameVersion &v) {
+    if (strcmp(v.romfs_marker, "System/Version.txt")) {
+        if (!file_exists(romfs + "/" + v.romfs_marker)) return std::string("It has no ") + v.romfs_marker + ".";
+        unsigned want = (unsigned)(v.romfs_files * ROMFS_FILES_MARGIN);
+        unsigned files = want ? count_files(romfs, want) : 0;
+        if (files < want) {
+            char msg[200];
+            snprintf(msg, sizeof msg, "It has %u files; with the update applied it has %u.", files, v.romfs_files);
+            return msg;
+        }
+        return "";
+    }
     char found[64] = "";
     if (FILE *f = fopen((romfs + "/System/Version.txt").c_str(), "rb")) {
         size_t n = fread(found, 1, sizeof found - 1, f);

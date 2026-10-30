@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "gamelib.h"
+#include "game_versions.h"
 #include "paths.h"
 #include "platform.h"
 #include "rt.h"
@@ -30,6 +31,27 @@
 #else
 #define SEP "/"
 #endif
+
+static bool site_free_game(const char *game_dir) {
+    char path[1100];
+    snprintf(path, sizeof path, "%s" SEP "exefs" SEP "main", game_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    unsigned char id[8];
+    bool read = fseek(f, 0x40, SEEK_SET) == 0 && fread(id, 1, sizeof id, f) == sizeof id;
+    fclose(f);
+    if (!read) return false;
+    char hex[17];
+    for (int i = 0; i < 8; i++) snprintf(hex + i * 2, 3, "%02x", id[i]);
+    static const struct { const char *id; bool sites; } versions[] = {
+#define CODE_SITES(v, id, ok, files, marker, sites) {id, sites},
+        GAME_VERSIONS(CODE_SITES)
+#undef CODE_SITES
+    };
+    for (size_t i = 0; i < sizeof versions / sizeof versions[0]; i++)
+        if (!strcmp(hex, versions[i].id)) return !versions[i].sites;
+    return false;
+}
 
 // ------------------------------------------------------------------ child processes
 // Every one running, so that quitting mid-build ends them too (atexit) instead of leaving compilers behind.
@@ -333,6 +355,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         t.cc, t.zig ? " cc" : "", o->jobs);
     LOG("[gamebuild] target%s: %s\n", gamelib_compat() ? " (compatible: no FMA instructions, slower)" : "",
         target_cflags());
+    bool no_sites = site_free_game(game_dir);
 
     // 1. the modules' layout (tools/layout.py): which modules, at which addresses
     Gen gens[MAX_MODULES];
@@ -352,6 +375,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add(&a, "layout");
         add(&a, exefs);
         add(&a, work);
+        if (no_sites) add(&a, "--no-sites");
         PlatProc p = spawn(a.v, log);
         args_free(&a);
         int r = p ? wait_for(p) : 255;
@@ -384,6 +408,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add(&a, layout);
         add(&a, g->out);
         if (strcmp(g->name, "main")) { add(&a, "--hle"); add(&a, t.hle); }
+        if (no_sites) add(&a, "--no-sites");
         g->p = spawn(a.v, g->log);
         args_free(&a);
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }

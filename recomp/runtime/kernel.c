@@ -1054,7 +1054,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: case 17: v = 0; break;
+        case 16: v = g_system_resource_size; break;  // TotalSystemResourceSize (main.npdm)
+        case 17: v = g_system_resource_size ? 0x400000 : 0; break;  // UsedSystemResourceSize
         case 18: v = g_program_id; break;  // ProgramId (main.npdm)
         // UserExceptionContextAddress: a zeroed page at the top of the TLS region. BOTW 1.8.2's
         // nn::os::SetDyingMessageRegion stores its dying-message pointer at +0x1c0 there.

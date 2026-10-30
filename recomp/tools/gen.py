@@ -368,12 +368,24 @@ class Module:
                     ext.add(ins.target)
             elif ins.kind == 'br':
                 jt = self.jump_table(a, entry, end)
+                computed = not jt and self.computed_target(a, (self.fde(a) or (entry,))[0])
+                if not jt and not computed:
+                    # A compiler can keep a local continuation in a register (ADR xN, label;
+                    # ...; BR xN). It is still a branch into this function, not a call to a
+                    # separately compiled function. Collect the ADR targets for that register;
+                    # the switch below also retains the normal dispatch fallback on a miss.
+                    rn = bits(self.word(a), 5, 5)
+                    jt = sorted({p + (((((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3)) ^ 0x100000) - 0x100000
+                                 for p in range(entry, end, 4)
+                                 for w in (self.word(p),)
+                                 if (w & 0x9f00001f) == (0x10000000 | rn)})
+                    jt = [t for t in jt if self.in_text(t)] if len(jt) <= 8 else []
                 if jt:
                     tables[a] = jt
                     # (a target outside this piece of a split function is a boundary, reached by a tail call)
                     for t in jt:
                         (labels if entry <= t < end else ext).add(t)
-                elif self.computed_target(a, (self.fde(a) or (entry,))[0]):
+                elif computed:
                     # unresolved table jump: allow jumping to any instruction of the function
                     tables[a] = 'all'
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
