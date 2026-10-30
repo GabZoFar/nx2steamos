@@ -1,0 +1,4 @@
+# The Legend of Zelda: Breath of the Wild on the Steam Deck engine (recomp/, Savage Wind Recomp: docs/RECOMP.md); porter/deck.py reads it. The versions the engine runs
+# are its own table's (recomp/runtime/game_versions.h: 1.8.2, 1.9.0). Savage Wind's testers played the opening and the Great Plateau, and its own Steam Deck test
+# (recomp/docs/linux.md, 2026-10-23) measured about 40 fps with the 60 fps cap; no port made by nx2steamos has run on a device yet.
+status	untested
